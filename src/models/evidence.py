@@ -7,11 +7,11 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
-    ForeignKey,
     ForeignKeyConstraint,
     Index,
     String,
     Text,
+    UniqueConstraint,
     event,
     func,
     text,
@@ -19,10 +19,13 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from src.db.base import Base, UUIDPrimaryKeyMixin, str_enum
+from src.db.base import Base, ImmutableRecordError, UUIDPrimaryKeyMixin, str_enum
+from src.models.assignment import assignment_scope_fk
 
 if TYPE_CHECKING:
     from src.models.assignment import InvestigationAssignment
+    from src.models.finding import FindingEvidence
+    from src.models.hypothesis import HypothesisEvidence
     from src.models.tool_call import ToolCall
 
 MAX_SUMMARY_CHARS = 4_000
@@ -40,6 +43,13 @@ class EvidenceType(StrEnum):
     OTHER = "other"
 
 
+class EvidenceStance(StrEnum):
+    SUPPORTS = "supports"
+    CONTRADICTS = "contradicts"
+    # Checked and found irrelevant; kept so the audit shows what was ruled out.
+    NEUTRAL = "neutral"
+
+
 class Evidence(UUIDPrimaryKeyMixin, Base):
     """A verifiable observation backed by tool output. Never an LLM conclusion.
 
@@ -48,6 +58,10 @@ class Evidence(UUIDPrimaryKeyMixin, Base):
 
     __tablename__ = "evidence"
     __table_args__ = (
+        assignment_scope_fk(),
+        # Target for hypothesis/finding link FKs, which allow any assignment of the same
+        # investigation and environment.
+        UniqueConstraint("investigation_id", "environment_id", "id", name="uq_evidence_scope"),
         # Composite FK: when tool_call_id is set, the tool call must belong to the same
         # assignment. MATCH SIMPLE skips the check when tool_call_id is NULL.
         ForeignKeyConstraint(
@@ -62,9 +76,9 @@ class Evidence(UUIDPrimaryKeyMixin, Base):
         ),
     )
 
-    assignment_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("investigation_assignments.id", ondelete="RESTRICT")
-    )
+    assignment_id: Mapped[uuid.UUID]
+    investigation_id: Mapped[uuid.UUID]
+    environment_id: Mapped[uuid.UUID]
     tool_call_id: Mapped[uuid.UUID | None] = mapped_column(index=True)
     evidence_type: Mapped[EvidenceType] = mapped_column(str_enum(EvidenceType))
     # Free text so a new telemetry provider needs no migration.
@@ -85,24 +99,34 @@ class Evidence(UUIDPrimaryKeyMixin, Base):
         Boolean, default=False, server_default=text("false")
     )
 
+    # Setting `assignment` also fills investigation_id and environment_id via the composite FK.
     assignment: Mapped["InvestigationAssignment"] = relationship(
         back_populates="evidence", lazy="raise"
     )
-    # foreign_keys limits ORM sync to tool_call_id; otherwise the composite FK would make
-    # this relationship and `assignment` both write assignment_id. Callers set
-    # assignment_id; the DB verifies it matches the tool call.
+    # foreign_keys limits ORM sync to tool_call_id; otherwise this relationship and
+    # `assignment` would both write assignment_id. The DB verifies they match.
     tool_call: Mapped["ToolCall | None"] = relationship(
         back_populates="evidence",
         primaryjoin="Evidence.tool_call_id == ToolCall.id",
         foreign_keys=[tool_call_id],
         lazy="raise",
     )
-
-
-class EvidenceImmutableError(Exception):
-    pass
+    hypothesis_links: Mapped[list["HypothesisEvidence"]] = relationship(
+        back_populates="evidence",
+        primaryjoin="Evidence.id == HypothesisEvidence.evidence_id",
+        foreign_keys="[HypothesisEvidence.evidence_id]",
+        passive_deletes="all",
+        lazy="raise",
+    )
+    finding_links: Mapped[list["FindingEvidence"]] = relationship(
+        back_populates="evidence",
+        primaryjoin="Evidence.id == FindingEvidence.evidence_id",
+        foreign_keys="[FindingEvidence.evidence_id]",
+        passive_deletes="all",
+        lazy="raise",
+    )
 
 
 @event.listens_for(Evidence, "before_update")
 def _reject_evidence_update(_mapper, _connection, _target: Evidence) -> None:
-    raise EvidenceImmutableError("evidence is immutable once recorded")
+    raise ImmutableRecordError("evidence is immutable once recorded")
