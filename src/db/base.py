@@ -1,7 +1,9 @@
 import uuid
 from datetime import datetime
+from enum import StrEnum
 
 from sqlalchemy import DateTime, MetaData, func
+from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 # Deterministic constraint names keep Alembic autogenerate diffs stable.
@@ -28,4 +30,15 @@ class TimestampMixin:
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+def str_enum(enum_cls: type[StrEnum]) -> SAEnum:
+    # VARCHAR + CHECK instead of native PG ENUM: adding values later is a plain migration.
+    return SAEnum(
+        enum_cls,
+        native_enum=False,
+        create_constraint=True,
+        length=32,
+        values_callable=lambda e: [m.value for m in e],
     )
