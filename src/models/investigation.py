@@ -6,7 +6,13 @@ from sqlalchemy import CheckConstraint, DateTime, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from src.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin, str_enum
+from src.db.base import (
+    COMPLETED_AFTER_STARTED,
+    Base,
+    TimestampMixin,
+    UUIDPrimaryKeyMixin,
+    str_enum,
+)
 
 if TYPE_CHECKING:
     from src.models.assignment import InvestigationAssignment
@@ -36,7 +42,10 @@ class TriggerType(StrEnum):
 
 class Investigation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "investigations"
-    __table_args__ = (CheckConstraint("current_round >= 1", name="current_round_positive"),)
+    __table_args__ = (
+        CheckConstraint("current_round >= 1", name="current_round_positive"),
+        CheckConstraint(COMPLETED_AFTER_STARTED, name="completed_after_started"),
+    )
 
     title: Mapped[str] = mapped_column(String(255))
     question: Mapped[str] = mapped_column(Text)
@@ -55,10 +64,8 @@ class Investigation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     final_result_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
-    # passive_deletes: the DB's ON DELETE CASCADE removes children without loading them.
+    # passive_deletes="all": let the RESTRICT FK reject the delete instead of the ORM
+    # trying to NULL out a non-nullable investigation_id.
     assignments: Mapped[list["InvestigationAssignment"]] = relationship(
-        back_populates="investigation",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-        lazy="raise",
+        back_populates="investigation", passive_deletes="all", lazy="raise"
     )

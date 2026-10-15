@@ -16,6 +16,10 @@ NAMING_CONVENTION = {
 }
 
 
+# started_at may stay NULL when work is cancelled before it ever runs.
+COMPLETED_AFTER_STARTED = "completed_at IS NULL OR started_at IS NULL OR completed_at >= started_at"
+
+
 class Base(DeclarativeBase):
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
