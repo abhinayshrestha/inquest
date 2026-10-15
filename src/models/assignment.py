@@ -6,11 +6,19 @@ from typing import TYPE_CHECKING
 from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from src.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin, str_enum
+from src.db.base import (
+    COMPLETED_AFTER_STARTED,
+    Base,
+    TimestampMixin,
+    UUIDPrimaryKeyMixin,
+    str_enum,
+)
 
 if TYPE_CHECKING:
     from src.models.environment import Environment
+    from src.models.evidence import Evidence
     from src.models.investigation import Investigation
+    from src.models.tool_call import ToolCall
 
 
 class AssignmentStatus(StrEnum):
@@ -26,14 +34,16 @@ class InvestigationAssignment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "investigation_assignments"
     __table_args__ = (
         CheckConstraint("round >= 1", name="round_positive"),
+        CheckConstraint(COMPLETED_AFTER_STARTED, name="completed_after_started"),
         # Orchestrator's hot query: assignments of one investigation in one round.
         Index("ix_investigation_assignments_investigation_id_round", "investigation_id", "round"),
     )
 
+    # RESTRICT on both FKs: deleting an investigation or environment must never erase
+    # investigation history (D006).
     investigation_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("investigations.id", ondelete="CASCADE")
+        ForeignKey("investigations.id", ondelete="RESTRICT")
     )
-    # RESTRICT: deleting an environment must never erase investigation history.
     environment_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("environments.id", ondelete="RESTRICT"), index=True
     )
@@ -51,3 +61,9 @@ class InvestigationAssignment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="assignments", lazy="raise"
     )
     environment: Mapped["Environment"] = relationship(back_populates="assignments", lazy="raise")
+    tool_calls: Mapped[list["ToolCall"]] = relationship(
+        back_populates="assignment", passive_deletes="all", lazy="raise"
+    )
+    evidence: Mapped[list["Evidence"]] = relationship(
+        back_populates="assignment", passive_deletes="all", lazy="raise"
+    )

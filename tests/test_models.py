@@ -1,5 +1,7 @@
+from datetime import UTC, datetime, timedelta
+
 import pytest
-from sqlalchemy import func, select, text
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -14,6 +16,8 @@ from src.models import (
     InvestigationStatus,
     TriggerType,
 )
+
+STARTED = datetime(2026, 10, 15, 1, 0, tzinfo=UTC)
 
 
 async def _seed(session: AsyncSession) -> tuple[Environment, Investigation]:
@@ -73,14 +77,14 @@ async def test_enum_stored_as_lowercase_value(session: AsyncSession) -> None:
     assert status is AssignmentStatus.TIMED_OUT
 
 
-async def test_deleting_investigation_cascades_to_assignments(session: AsyncSession) -> None:
+async def test_deleting_investigation_with_assignments_is_restricted(
+    session: AsyncSession,
+) -> None:
     _, investigation = await _seed(session)
 
     await session.delete(investigation)
-    await session.flush()
-
-    count = await session.scalar(select(func.count()).select_from(InvestigationAssignment))
-    assert count == 0
+    with pytest.raises(IntegrityError, match="fk_investigation_assignments_investigation_id"):
+        await session.flush()
 
 
 async def test_deleting_environment_with_assignments_is_restricted(session: AsyncSession) -> None:
@@ -111,3 +115,30 @@ async def test_round_must_be_positive(session: AsyncSession) -> None:
 
     with pytest.raises(IntegrityError, match="ck_investigation_assignments_round_positive"):
         await session.flush()
+
+
+async def _seeded_record(
+    session: AsyncSession, table: str
+) -> Investigation | InvestigationAssignment:
+    _, investigation = await _seed(session)
+    return investigation if table == "investigations" else investigation.assignments[0]
+
+
+@pytest.mark.parametrize("table", ["investigations", "investigation_assignments"])
+async def test_completed_before_started_is_rejected(session: AsyncSession, table: str) -> None:
+    record = await _seeded_record(session, table)
+    record.started_at = STARTED
+    record.completed_at = STARTED - timedelta(seconds=1)
+
+    with pytest.raises(IntegrityError, match=f"ck_{table}_completed_after_started"):
+        await session.flush()
+
+
+@pytest.mark.parametrize("table", ["investigations", "investigation_assignments"])
+async def test_cancelled_before_start_is_allowed(session: AsyncSession, table: str) -> None:
+    record = await _seeded_record(session, table)
+    record.completed_at = STARTED
+
+    await session.flush()
+
+    assert record.started_at is None
