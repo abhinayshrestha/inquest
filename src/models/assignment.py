@@ -3,7 +3,15 @@ from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Text
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.db.base import (
@@ -17,6 +25,8 @@ from src.db.base import (
 if TYPE_CHECKING:
     from src.models.environment import Environment
     from src.models.evidence import Evidence
+    from src.models.finding import Finding
+    from src.models.hypothesis import Hypothesis
     from src.models.investigation import Investigation
     from src.models.tool_call import ToolCall
 
@@ -30,6 +40,20 @@ class AssignmentStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+def assignment_scope_fk() -> ForeignKeyConstraint:
+    # Records that copy their assignment's (investigation_id, environment_id) use this so
+    # the copy can never drift. A new constraint per table: constraints can't be shared.
+    return ForeignKeyConstraint(
+        ["assignment_id", "investigation_id", "environment_id"],
+        [
+            "investigation_assignments.id",
+            "investigation_assignments.investigation_id",
+            "investigation_assignments.environment_id",
+        ],
+        ondelete="RESTRICT",
+    )
+
+
 class InvestigationAssignment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "investigation_assignments"
     __table_args__ = (
@@ -37,6 +61,11 @@ class InvestigationAssignment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint(COMPLETED_AFTER_STARTED, name="completed_after_started"),
         # Orchestrator's hot query: assignments of one investigation in one round.
         Index("ix_investigation_assignments_investigation_id_round", "investigation_id", "round"),
+        # Target for the scope FKs on evidence, hypotheses and findings: their copied
+        # (investigation_id, environment_id) must match their assignment's.
+        UniqueConstraint(
+            "investigation_id", "environment_id", "id", name="uq_investigation_assignments_scope"
+        ),
     )
 
     # RESTRICT on both FKs: deleting an investigation or environment must never erase
@@ -65,5 +94,11 @@ class InvestigationAssignment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="assignment", passive_deletes="all", lazy="raise"
     )
     evidence: Mapped[list["Evidence"]] = relationship(
+        back_populates="assignment", passive_deletes="all", lazy="raise"
+    )
+    hypotheses: Mapped[list["Hypothesis"]] = relationship(
+        back_populates="assignment", passive_deletes="all", lazy="raise"
+    )
+    findings: Mapped[list["Finding"]] = relationship(
         back_populates="assignment", passive_deletes="all", lazy="raise"
     )

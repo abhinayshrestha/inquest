@@ -12,8 +12,8 @@ from src.models import (
     Environment,
     EnvironmentType,
     Evidence,
-    EvidenceImmutableError,
     EvidenceType,
+    ImmutableRecordError,
     Investigation,
     InvestigationAssignment,
     ToolCall,
@@ -216,7 +216,7 @@ async def test_evidence_is_immutable(session: AsyncSession) -> None:
     await session.flush()
 
     evidence.summary = "rewritten after the fact"
-    with pytest.raises(EvidenceImmutableError):
+    with pytest.raises(ImmutableRecordError):
         await session.flush()
 
 
