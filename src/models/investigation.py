@@ -15,7 +15,8 @@ if TYPE_CHECKING:
 class InvestigationStatus(StrEnum):
     # Lifecycle only. Outcome (e.g. inconclusive) lives in final_result_json.
     PENDING = "pending"
-    RUNNING = "running"
+    INVESTIGATING = "investigating"
+    CORRELATING = "correlating"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
