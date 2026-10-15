@@ -30,6 +30,11 @@ test = "pytest"
 lint = "ruff check ."
 format = "ruff format ."
 
+# Database migrations
+migration = "alembic upgrade head"
+migration-down = "alembic downgrade -1"
+migration-history = "alembic history"
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
