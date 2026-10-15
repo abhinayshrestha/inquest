@@ -9,14 +9,17 @@ import pytest  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
-from src.db.session import engine  # noqa: E402
+from src.db.session import engine, get_session  # noqa: E402
 from src.main import app  # noqa: E402
 
 
 @pytest.fixture
-async def client() -> AsyncIterator[AsyncClient]:
+async def client(session: AsyncSession) -> AsyncIterator[AsyncClient]:
+    # Route requests through the rolled-back test session so API tests leave no rows behind.
+    app.dependency_overrides[get_session] = lambda: session
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
+    app.dependency_overrides.clear()
 
 
 @pytest.fixture
