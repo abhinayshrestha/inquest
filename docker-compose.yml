@@ -1,0 +1,23 @@
+# Values come from .env (docker compose loads it automatically).
+services:
+  postgres:
+    image: postgres:16
+    container_name: inquest-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set in .env}
+      POSTGRES_TEST_DB: ${POSTGRES_TEST_DB:?set in .env}
+    ports:
+      - "${POSTGRES_PORT:?set in .env}:5432"
+    volumes:
+      - inquest-pgdata:/var/lib/postgresql/data
+      - ./scripts/init-test-db.sh:/docker-entrypoint-initdb.d/init-test-db.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  inquest-pgdata:
