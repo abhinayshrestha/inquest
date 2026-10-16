@@ -1,0 +1,43 @@
+{
+  "status": "success",
+  "data": {
+    "type": "time_series",
+    "data": {
+      "results": [
+        {
+          "queryName": "A",
+          "aggregations": [
+            {
+              "index": 0,
+              "alias": "log_count",
+              "meta": {},
+              "series": [
+                {
+                  "labels": [{"key": {"name": "log.file.name"}, "value": "syslog"}],
+                  "values": [
+                    {"timestamp": 1791986400000, "value": 10},
+                    {"timestamp": 1791986460000, "value": 12},
+                    {"timestamp": 1791986520000, "value": 480},
+                    {"timestamp": 1791986580000, "value": 11},
+                    {"timestamp": 1791986640000, "value": 9}
+                  ]
+                },
+                {
+                  "labels": [{"key": {"name": "log.file.name"}, "value": "auth.log"}],
+                  "values": [
+                    {"timestamp": 1791986400000, "value": 0},
+                    {"timestamp": 1791986460000, "value": 2},
+                    {"timestamp": 1791986520000, "value": 1},
+                    {"timestamp": 1791986580000, "value": 0},
+                    {"timestamp": 1791986640000, "value": 0}
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "meta": {"rowsScanned": 5000, "bytesScanned": 40000, "durationMs": 12}
+  }
+}

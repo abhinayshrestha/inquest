@@ -1,0 +1,32 @@
+{
+  "status": "success",
+  "data": {
+    "type": "time_series",
+    "data": {
+      "results": [
+        {
+          "queryName": "F",
+          "aggregations": [
+            {
+              "index": 0,
+              "alias": "",
+              "meta": {},
+              "series": [
+                {
+                  "labels": [{"key": {"name": "host.name"}, "value": "abbyvm-QEMU-Virtual-Machine"}],
+                  "values": [
+                    {"timestamp": 1791986400000, "value": 3.5},
+                    {"timestamp": 1791986460000, "value": 4.5},
+                    {"timestamp": 1791986520000, "value": 97.25},
+                    {"timestamp": 1791986580000, "value": 96.0}
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "meta": {"rowsScanned": 28800, "bytesScanned": 1843200, "durationMs": 41}
+  }
+}

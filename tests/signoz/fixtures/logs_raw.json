@@ -1,0 +1,50 @@
+{
+  "status": "success",
+  "data": {
+    "type": "raw",
+    "data": {
+      "results": [
+        {
+          "queryName": "A",
+          "nextCursor": "",
+          "rows": [
+            {
+              "timestamp": "2026-10-14T15:09:12.283261723Z",
+              "data": {
+                "id": "2rLx1",
+                "timestamp": 1791990552283261723,
+                "body": "kernel: Out of memory: Killed process 4121 (node)",
+                "severity_text": "",
+                "attributes_string": {"log.file.name": "syslog", "log.file.path": "/var/log/syslog"},
+                "attributes_number": {},
+                "attributes_bool": {},
+                "resources_string": {"host.name": "abbyvm-QEMU-Virtual-Machine", "os.type": "linux"}
+              }
+            },
+            {
+              "timestamp": "2026-10-14T15:08:01Z",
+              "data": {
+                "id": "2rLx0",
+                "body": "sshd[991]: login attempt password=hunter2 from 10.0.0.5",
+                "severity_text": "",
+                "attributes_string": {"log.file.name": "auth.log", "log.file.path": "/var/log/auth.log"},
+                "resources_string": {"host.name": "abbyvm-QEMU-Virtual-Machine", "os.type": "linux"}
+              }
+            },
+            {
+              "timestamp": "2026-10-14T15:07:00Z",
+              "data": {
+                "id": "2rLwz",
+                "body": "systemd[1]: Started Daily apt download activities.",
+                "severity_text": "",
+                "attributes_string": {"log.file.name": "syslog"},
+                "resources_string": {"host.name": "abbyvm-QEMU-Virtual-Machine"}
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "meta": {"rowsScanned": 120000, "bytesScanned": 9000000, "durationMs": 87}
+  }
+}
