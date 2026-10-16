@@ -192,10 +192,16 @@ def cap_series(series: list[SeriesStats]) -> tuple[list[SeriesStats], bool]:
     return ranked[:MAX_SERIES], len(ranked) > MAX_SERIES
 
 
+def json_size(value: Any) -> int:
+    # Postgres measures jsonb as text with ", " and ": " separators, which compact JSON
+    # undercounts by about two bytes per key; measure the way the CHECK constraint does.
+    return len(json.dumps(value, ensure_ascii=False).encode())
+
+
 def fit(model: BaseModel, items: list) -> bool:
     """Drops trailing items until the model fits in Evidence.data_json."""
     cut = False
-    while items and len(model.model_dump_json()) > MAX_DATA_BYTES:
+    while items and json_size(model.model_dump(mode="json")) > MAX_DATA_BYTES:
         items.pop()
         cut = True
     return cut

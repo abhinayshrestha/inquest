@@ -1,8 +1,18 @@
+import math
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+    model_validator,
+)
 
 # Bounds keep each result small enough for a model prompt and for Evidence.data_json (64 KB).
 MAX_RANGE = {
@@ -19,19 +29,96 @@ MAX_TRACE_SPANS = 200
 MAX_LOG_BODY_CHARS = 500
 MAX_ATTRS_PER_ROW = 10
 MAX_ATTR_VALUE_CHARS = 200
-MAX_FILTER_CHARS = 500
+MAX_CONDITIONS = 5
+MAX_CONDITION_VALUES = 10
+MAX_CONDITION_VALUE_CHARS = 200
+MAX_SCOPE_VALUES = 20
 MAX_SUMMARY_CHARS = 4_000
 # Headroom under Evidence's 65_536-byte data_json CHECK.
 MAX_DATA_BYTES = 60_000
 CLOCK_SKEW = timedelta(minutes=1)
 
 Name = Annotated[str, Field(min_length=1, max_length=255)]
-SigNozFilter = Annotated[str, Field(min_length=1, max_length=MAX_FILTER_CHARS)]
 FieldKey = Annotated[str, Field(max_length=100, pattern=r"^[A-Za-z0-9_.]+$")]
+
+# Which resource attribute ties a query's telemetry to an environment.
+Identity = Literal["host", "service"]
+IDENTITY_KEYS: dict[str, str] = {"host": "host.name", "service": "service.name"}
+DEPLOYMENT_ENVIRONMENT_KEY = "deployment.environment"
+# Identity is chosen through typed fields and the trusted Scope, never through conditions.
+PROTECTED_KEYS = frozenset({*IDENTITY_KEYS.values(), DEPLOYMENT_ENVIRONMENT_KEY})
+# Filter-grammar keywords; a key spelled like one could change how the expression parses.
+RESERVED_WORDS = frozenset(
+    {
+        "and", "or", "not", "in", "like", "ilike", "between", "exists", "regexp",
+        "contains", "has", "hasany", "hasall", "hastoken", "true", "false", "null",
+    }
+)  # fmt: skip
 
 
 class _Request(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+ConditionText = Annotated[str, Field(min_length=1, max_length=MAX_CONDITION_VALUE_CHARS)]
+Scalar = StrictBool | StrictInt | StrictFloat | ConditionText
+Number = StrictInt | StrictFloat
+
+
+class Condition(_Request):
+    """One structured predicate. Rendered by trusted code with every value quoted, so no
+    model-supplied text can change the filter's structure."""
+
+    key: str = Field(max_length=100, pattern=r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)*$")
+    op: Literal[
+        "eq", "neq", "gt", "gte", "lt", "lte",
+        "in", "not_in", "contains", "not_contains", "exists", "not_exists",
+    ]  # fmt: skip
+    value: Scalar | list[Scalar] | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> "Condition":
+        if self.key.lower() in RESERVED_WORDS:
+            raise ValueError(f"condition key {self.key!r} is a reserved word")
+        if self.key.lower() in PROTECTED_KEYS:
+            raise ValueError(
+                f"condition key {self.key!r} is an identity key; use the host/service fields"
+            )
+        value = self.value
+        if self.op in ("exists", "not_exists"):
+            ok = value is None
+        elif self.op in ("in", "not_in"):
+            ok = isinstance(value, list) and 1 <= len(value) <= MAX_CONDITION_VALUES
+        elif self.op in ("gt", "gte", "lt", "lte"):
+            ok = isinstance(value, int | float) and not isinstance(value, bool)
+        elif self.op in ("contains", "not_contains"):
+            ok = isinstance(value, str)
+        else:
+            ok = value is not None and not isinstance(value, list)
+        if not ok:
+            raise ValueError(f"value does not fit operator {self.op!r}")
+        values = value if isinstance(value, list) else [value]
+        if any(isinstance(v, float) and not math.isfinite(v) for v in values):
+            raise ValueError("numeric values must be finite")
+        return self
+
+
+Where = Annotated[list[Condition], Field(default_factory=list, max_length=MAX_CONDITIONS)]
+
+
+class Scope(_Request):
+    """Mandatory environment restriction. Built only by trusted code (the tool executor);
+    never a field of a request model, so a model cannot supply or widen it."""
+
+    identity: Identity
+    values: tuple[Name, ...] = Field(min_length=1, max_length=MAX_SCOPE_VALUES)
+    deployment_environment: Name | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> "Scope":
+        if self.deployment_environment and self.identity != "service":
+            raise ValueError("deployment_environment applies to service identity only")
+        return self
 
 
 class TimeRange(_Request):
@@ -69,6 +156,8 @@ class CustomMetric(_Request):
     """Escape hatch for metrics without a preset; aggregations restricted to SigNoz enums."""
 
     metric_name: str = Field(max_length=200, pattern=r"^[A-Za-z0-9_.]+$")
+    # Presets know whether they are host or service telemetry; a custom metric must say.
+    identity: Identity
     time_aggregation: (
         Literal["latest", "sum", "avg", "min", "max", "count", "rate", "increase"] | None
     ) = None
@@ -82,7 +171,7 @@ class MetricQueryRequest(_Request):
     host: Name | None = None
     service: Name | None = None
     group_by: list[FieldKey] = Field(default_factory=list, max_length=3)
-    filter: SigNozFilter | None = None
+    where: Where
     step_seconds: int | None = Field(default=None, ge=10, le=3600)
 
     @model_validator(mode="after")
@@ -95,12 +184,16 @@ class MetricQueryRequest(_Request):
 
 class LogFilters(_Request):
     time_range: TimeRange
+    # System logs (syslog, auth.log) are host telemetry; application logs are service telemetry.
+    identity: Identity = "host"
     host: Name | None = None
     service: Name | None = None
     log_file: Name | None = None
     body_contains: str | None = Field(default=None, min_length=1, max_length=200)
-    severity: list[str] | None = Field(default=None, min_length=1, max_length=6)
-    filter: SigNozFilter | None = None
+    severity: list[Annotated[str, Field(min_length=1, max_length=20)]] | None = Field(
+        default=None, min_length=1, max_length=6
+    )
+    where: Where
 
     @model_validator(mode="after")
     def _check(self) -> "LogFilters":
@@ -125,7 +218,7 @@ class SpanSearchRequest(_Request):
     operation: Name | None = None
     errors_only: bool = False
     min_duration_ms: float | None = Field(default=None, ge=0)
-    filter: SigNozFilter | None = None
+    where: Where
     order_by: Literal["timestamp", "duration"] = "timestamp"
     limit: int = Field(default=50, ge=1, le=MAX_ROWS_PER_PAGE)
     offset: int = Field(default=0, ge=0, le=MAX_OFFSET)
@@ -140,7 +233,7 @@ class TraceStatsRequest(_Request):
     time_range: TimeRange
     service: Name | None = None
     group_by: Literal["service", "operation"] = "operation"
-    filter: SigNozFilter | None = None
+    where: Where
 
     @model_validator(mode="after")
     def _check(self) -> "TraceStatsRequest":

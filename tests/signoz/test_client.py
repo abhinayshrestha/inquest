@@ -26,7 +26,7 @@ from src.integrations.signoz.schemas import (
     TraceStatsRequest,
 )
 from src.integrations.signoz.settings import load_signoz_settings
-from tests.signoz.conftest import TEST_API_KEY, load_fixture
+from tests.signoz.conftest import HOST_SCOPE, SERVICE_SCOPE, TEST_API_KEY, load_fixture
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -60,6 +60,7 @@ async def test_query_metrics_sends_api_key_and_normalizes(settings, time_range):
     async with mock_client(handler) as client:
         result = await query_metrics(
             MetricQueryRequest(time_range=time_range, metric="cpu_utilization"),
+            scope=HOST_SCOPE,
             settings=settings,
             client=client,
         )
@@ -86,6 +87,7 @@ async def test_search_logs_end_to_end_marks_redaction(settings, time_range):
     async with mock_client(handler) as client:
         result = await search_logs(
             LogSearchRequest(time_range=time_range, log_file="auth.log", limit=5),
+            scope=HOST_SCOPE,
             settings=settings,
             client=client,
         )
@@ -103,11 +105,15 @@ async def test_log_volume_and_trace_stats_end_to_end(settings, time_range):
     async with mock_client(handler) as client:
         volume = await log_volume(
             LogVolumeRequest(time_range=time_range, group_by="log_file"),
+            scope=HOST_SCOPE,
             settings=settings,
             client=client,
         )
         stats = await trace_stats(
-            TraceStatsRequest(time_range=time_range), settings=settings, client=client
+            TraceStatsRequest(time_range=time_range),
+            scope=SERVICE_SCOPE,
+            settings=settings,
+            client=client,
         )
     assert volume.data.total_count == 525
     assert stats.data.groups[0].group == "GET /api/orders"
@@ -254,22 +260,30 @@ def fixture_handler(name: str) -> Handler:
 
 
 @pytest.mark.parametrize(
-    ("operation", "request_model", "fixture"),
+    ("operation", "request_model", "scope", "fixture"),
     [
         (
             query_metrics,
             lambda tr: MetricQueryRequest(time_range=tr, metric="cpu_utilization"),
+            HOST_SCOPE,
             "metrics_formula.json",
         ),
-        (log_volume, lambda tr: LogVolumeRequest(time_range=tr), "log_volume.json"),
-        (trace_stats, lambda tr: TraceStatsRequest(time_range=tr), "trace_stats_scalar.json"),
+        (log_volume, lambda tr: LogVolumeRequest(time_range=tr), HOST_SCOPE, "log_volume.json"),
+        (
+            trace_stats,
+            lambda tr: TraceStatsRequest(time_range=tr),
+            SERVICE_SCOPE,
+            "trace_stats_scalar.json",
+        ),
     ],
 )
 async def test_aggregated_results_have_no_observed_at(
-    settings, time_range, operation, request_model, fixture
+    settings, time_range, operation, request_model, scope, fixture
 ):
     async with mock_client(fixture_handler(fixture)) as client:
-        result = await operation(request_model(time_range), settings=settings, client=client)
+        result = await operation(
+            request_model(time_range), scope=scope, settings=settings, client=client
+        )
     assert result.observed_at is None
     assert result.request["time_range"] == WINDOW
     assert result.source_reference.endswith("@1791986400000-1791990000000")
@@ -278,11 +292,17 @@ async def test_aggregated_results_have_no_observed_at(
 async def test_record_results_use_returned_timestamps(settings, time_range):
     async with mock_client(fixture_handler("logs_raw.json")) as client:
         logs = await search_logs(
-            LogSearchRequest(time_range=time_range), settings=settings, client=client
+            LogSearchRequest(time_range=time_range),
+            scope=HOST_SCOPE,
+            settings=settings,
+            client=client,
         )
     async with mock_client(fixture_handler("spans_raw.json")) as client:
         spans = await search_spans(
-            SpanSearchRequest(time_range=time_range), settings=settings, client=client
+            SpanSearchRequest(time_range=time_range),
+            scope=SERVICE_SCOPE,
+            settings=settings,
+            client=client,
         )
     assert logs.observed_at == datetime(2026, 10, 14, 15, 9, 12, 283261, tzinfo=UTC)
     assert spans.observed_at == datetime(2026, 10, 14, 7, 18, 15, 100000, tzinfo=UTC)
@@ -292,7 +312,10 @@ async def test_get_trace_provenance_keeps_query_window(settings, time_range):
     trace_id = "4bf92f3577b34da6a3ce929d0e0e4736"
     async with mock_client(fixture_handler("spans_raw.json")) as client:
         result = await get_trace(
-            TraceRequest(trace_id=trace_id, time_range=time_range), settings=settings, client=client
+            TraceRequest(trace_id=trace_id, time_range=time_range),
+            scope=SERVICE_SCOPE,
+            settings=settings,
+            client=client,
         )
     assert result.source_reference == f"signoz:trace:{trace_id}@1791986400000-1791990000000"
     assert result.request["time_range"] == WINDOW
@@ -370,7 +393,10 @@ async def test_get_trace_observed_at_is_earliest_returned_span_not_trace_start(
 
     async with mock_client(lambda _: httpx.Response(200, json=payload)) as client:
         result = await get_trace(
-            TraceRequest(trace_id=trace_id, time_range=time_range), settings=settings, client=client
+            TraceRequest(trace_id=trace_id, time_range=time_range),
+            scope=SERVICE_SCOPE,
+            settings=settings,
+            client=client,
         )
     assert result.data.completeness == "incomplete"
     assert not result.data.root_found

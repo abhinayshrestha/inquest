@@ -1,5 +1,6 @@
 import hashlib
 import json
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
@@ -16,6 +17,7 @@ from src.integrations.signoz.schemas import (
     MetricData,
     MetricQueryRequest,
     QueryStats,
+    Scope,
     SigNozResult,
     SpanData,
     SpanSearchRequest,
@@ -81,20 +83,21 @@ def _result[T](
     )
 
 
-def _invalid(exc: ValueError) -> SigNozError:
-    return SigNozError(SigNozErrorCode.INVALID_QUERY, str(exc))
+def _build[R](builder: Callable[..., R], req: Any, scope: Scope) -> R:
+    try:
+        return builder(req, scope)
+    except ValueError as exc:
+        raise SigNozError(SigNozErrorCode.INVALID_QUERY, str(exc)) from None
 
 
 async def query_metrics(
     req: MetricQueryRequest,
     *,
+    scope: Scope,
     settings: SigNozSettings | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> SigNozResult[MetricData]:
-    try:
-        body, label, unit, step = builders.metric_query(req)
-    except ValueError as exc:
-        raise _invalid(exc) from None
+    body, label, unit, step = _build(builders.metric_query, req, scope)
     has_formula = req.metric is not None and builders.PRESETS[req.metric].formula is not None
     results, stats, warnings = await _query(body, settings, client)
     data, truncated = normalize.metric_data(results, label, unit, step, "F" if has_formula else "A")
@@ -117,10 +120,11 @@ async def query_metrics(
 async def search_logs(
     req: LogSearchRequest,
     *,
+    scope: Scope,
     settings: SigNozSettings | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> SigNozResult[LogData]:
-    body = builders.log_search_query(req)
+    body = _build(builders.log_search_query, req, scope)
     results, stats, warnings = await _query(body, settings, client)
     data, truncated, redacted = normalize.log_data(results, req.limit, req.offset)
     return _result(
@@ -141,10 +145,11 @@ async def search_logs(
 async def log_volume(
     req: LogVolumeRequest,
     *,
+    scope: Scope,
     settings: SigNozSettings | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> SigNozResult[LogVolumeData]:
-    body, step = builders.log_volume_query(req)
+    body, step = _build(builders.log_volume_query, req, scope)
     results, stats, warnings = await _query(body, settings, client)
     data, truncated = normalize.log_volume_data(results, step)
     return _result(
@@ -164,10 +169,11 @@ async def log_volume(
 async def search_spans(
     req: SpanSearchRequest,
     *,
+    scope: Scope,
     settings: SigNozSettings | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> SigNozResult[SpanData]:
-    body = builders.span_search_query(req)
+    body = _build(builders.span_search_query, req, scope)
     results, stats, warnings = await _query(body, settings, client)
     data, truncated = normalize.span_data(results, req.limit, req.offset)
     return _result(
@@ -187,10 +193,11 @@ async def search_spans(
 async def trace_stats(
     req: TraceStatsRequest,
     *,
+    scope: Scope,
     settings: SigNozSettings | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> SigNozResult[TraceStatsData]:
-    body = builders.trace_stats_query(req)
+    body = _build(builders.trace_stats_query, req, scope)
     results, stats, warnings = await _query(body, settings, client)
     data, truncated = normalize.trace_stats_data(results, req.group_by)
     return _result(
@@ -210,10 +217,11 @@ async def trace_stats(
 async def get_trace(
     req: TraceRequest,
     *,
+    scope: Scope,
     settings: SigNozSettings | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> SigNozResult[TraceData]:
-    body = builders.trace_query(req)
+    body = _build(builders.trace_query, req, scope)
     results, stats, warnings = await _query(body, settings, client)
     data, truncated = normalize.trace_data(results, req.trace_id)
     return _result(
