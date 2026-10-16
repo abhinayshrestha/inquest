@@ -1,16 +1,22 @@
 import math
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, NamedTuple
 
 from src.integrations.signoz.schemas import (
+    DEPLOYMENT_ENVIRONMENT_KEY,
+    IDENTITY_KEYS,
     MAX_RAW_POINTS,
     MAX_SERIES,
     MAX_TRACE_SPANS,
+    Condition,
     HostMetric,
+    Identity,
     LogFilters,
     LogSearchRequest,
     LogVolumeRequest,
     MetricQueryRequest,
+    Scope,
     SpanSearchRequest,
     TimeRange,
     TraceRequest,
@@ -57,6 +63,7 @@ class Preset(NamedTuple):
     aggregations: tuple[Aggregation, ...]
     formula: str | None = None
     group_by: tuple[str, ...] = ("host.name",)
+    identity: Identity = "host"
 
 
 # Utilization metrics are disabled by default in the hostmetrics receiver and absent from
@@ -131,6 +138,7 @@ PRESETS: dict[HostMetric, Preset] = {
         (Aggregation("http.server.request.duration.bucket", None, "p99"),),
         None,
         ("service.name",),
+        "service",
     ),
 }
 
@@ -144,11 +152,76 @@ def quote(value: str) -> str:
     return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
-def and_filters(*parts: str | None, user_filter: str | None = None) -> str | None:
-    clauses = [p for p in parts if p]
-    if user_filter:
-        clauses.append(f"({user_filter})")
-    return " AND ".join(clauses) or None
+def literal(value: str | int | float | bool) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        # The filter grammar has no exponent notation; Decimal keeps every digit of repr.
+        return format(Decimal(repr(value)), "f")
+    return quote(value)
+
+
+CONDITION_OPS = {
+    "eq": "=",
+    "neq": "!=",
+    "gt": ">",
+    "gte": ">=",
+    "lt": "<",
+    "lte": "<=",
+    "in": "IN",
+    "not_in": "NOT IN",
+    "contains": "CONTAINS",
+    "not_contains": "NOT CONTAINS",
+    "exists": "EXISTS",
+    "not_exists": "NOT EXISTS",
+}
+
+
+def render_condition(condition: Condition) -> str:
+    # The key is pattern-restricted and not a keyword; every value goes through literal().
+    op = CONDITION_OPS[condition.op]
+    if condition.value is None:
+        return f"{condition.key} {op}"
+    if isinstance(condition.value, list):
+        return f"{condition.key} {op} [" + ", ".join(literal(v) for v in condition.value) + "]"
+    return f"{condition.key} {op} {literal(condition.value)}"
+
+
+def scope_clause(scope: Scope) -> str:
+    clause = f"{IDENTITY_KEYS[scope.identity]} IN [" + ", ".join(map(quote, scope.values)) + "]"
+    if scope.deployment_environment:
+        clause += f" AND {DEPLOYMENT_ENVIRONMENT_KEY} = {quote(scope.deployment_environment)}"
+    return f"({clause})"
+
+
+def and_filters(*parts: str | None) -> str | None:
+    # Every part is built here from quoted literals; none is free text from a request.
+    return " AND ".join(p for p in parts if p) or None
+
+
+def scoped(scope: Scope, *parts: str | None, where: list[Condition] | None = None) -> str:
+    # The scope clause comes first and is always present: no query leaves here unscoped.
+    rendered = [render_condition(c) for c in where or []]
+    return " AND ".join(p for p in (scope_clause(scope), *parts, *rendered) if p)
+
+
+def required_identity(req: object) -> Identity:
+    """The identity whose values restrict this request to one environment."""
+    if isinstance(req, MetricQueryRequest):
+        if req.custom is not None:
+            return req.custom.identity
+        assert req.metric is not None
+        return PRESETS[req.metric].identity
+    if isinstance(req, LogFilters):
+        return req.identity
+    return "service"
+
+
+def check_scope(req: object, scope: Scope) -> None:
+    if scope.identity != required_identity(req):
+        raise ValueError(f"request needs {required_identity(req)} scope, got {scope.identity}")
 
 
 def choose_step(time_range: TimeRange, requested: int | None) -> int:
@@ -180,8 +253,11 @@ def filter_spec(expression: str | None) -> dict[str, str] | None:
     return {"expression": expression} if expression else None
 
 
-def metric_query(req: MetricQueryRequest) -> tuple[dict[str, Any], str, str | None, int]:
+def metric_query(
+    req: MetricQueryRequest, scope: Scope
+) -> tuple[dict[str, Any], str, str | None, int]:
     """Returns (body, metric label, unit, step_seconds)."""
+    check_scope(req, scope)
     if req.metric is not None:
         preset = PRESETS[req.metric]
         label = req.metric.value
@@ -199,10 +275,11 @@ def metric_query(req: MetricQueryRequest) -> tuple[dict[str, Any], str, str | No
 
     group_by = list(dict.fromkeys([*preset.group_by, *req.group_by]))
     step = choose_step(req.time_range, req.step_seconds)
-    scope = and_filters(
+    restriction = scoped(
+        scope,
         f"host.name = {quote(req.host)}" if req.host else None,
         f"service.name = {quote(req.service)}" if req.service else None,
-        user_filter=req.filter,
+        where=req.where,
     )
 
     queries = []
@@ -220,7 +297,7 @@ def metric_query(req: MetricQueryRequest) -> tuple[dict[str, Any], str, str | No
                     "signal": "metrics",
                     "stepInterval": step,
                     "aggregations": [aggregation],
-                    "filter": filter_spec(and_filters(scope, agg.filter)),
+                    "filter": filter_spec(and_filters(restriction, agg.filter)),
                     "groupBy": [field_key(k) for k in group_by] or None,
                     # Formula operands are hidden so only the derived series comes back.
                     "disabled": bool(preset.formula),
@@ -234,27 +311,29 @@ def metric_query(req: MetricQueryRequest) -> tuple[dict[str, Any], str, str | No
     return envelope(req.time_range, "time_series", queries), label, preset.unit, step
 
 
-def log_filter(req: LogFilters) -> str | None:
+def log_filter(req: LogFilters, scope: Scope) -> str:
+    check_scope(req, scope)
     severity = None
     if req.severity:
         severity = "severity_text IN [" + ", ".join(quote(s) for s in req.severity) + "]"
-    return and_filters(
+    return scoped(
+        scope,
         f"host.name = {quote(req.host)}" if req.host else None,
         f"service.name = {quote(req.service)}" if req.service else None,
         f"log.file.name = {quote(req.log_file)}" if req.log_file else None,
         f"body CONTAINS {quote(req.body_contains)}" if req.body_contains else None,
         severity,
-        user_filter=req.filter,
+        where=req.where,
     )
 
 
-def log_search_query(req: LogSearchRequest) -> dict[str, Any]:
+def log_search_query(req: LogSearchRequest, scope: Scope) -> dict[str, Any]:
     # No selectFields: SigNoz then returns body, severity and the attribute/resource maps
     # without failing on keys that some log sources lack.
     spec = {
         "name": "A",
         "signal": "logs",
-        "filter": filter_spec(log_filter(req)),
+        "filter": filter_spec(log_filter(req, scope)),
         "order": [
             {"key": {"name": "timestamp", "fieldContext": "log"}, "direction": req.order},
             {"key": {"name": "id"}, "direction": req.order},
@@ -273,7 +352,7 @@ LOG_VOLUME_GROUP_KEYS = {
 }
 
 
-def log_volume_query(req: LogVolumeRequest) -> tuple[dict[str, Any], int]:
+def log_volume_query(req: LogVolumeRequest, scope: Scope) -> tuple[dict[str, Any], int]:
     step = choose_step(req.time_range, req.step_seconds)
     group = LOG_VOLUME_GROUP_KEYS.get(req.group_by) if req.group_by else None
     spec = {
@@ -281,7 +360,7 @@ def log_volume_query(req: LogVolumeRequest) -> tuple[dict[str, Any], int]:
         "signal": "logs",
         "stepInterval": step,
         "aggregations": [{"expression": "count()", "alias": "log_count"}],
-        "filter": filter_spec(log_filter(req)),
+        "filter": filter_spec(log_filter(req, scope)),
         "groupBy": [field_key(group)] if group else None,
         "order": [{"key": {"name": "log_count"}, "direction": "desc"}] if group else None,
         "limit": MAX_SERIES + 1 if group else None,
@@ -293,7 +372,8 @@ def log_volume_query(req: LogVolumeRequest) -> tuple[dict[str, Any], int]:
     return body, step
 
 
-def span_search_query(req: SpanSearchRequest) -> dict[str, Any]:
+def span_search_query(req: SpanSearchRequest, scope: Scope) -> dict[str, Any]:
+    check_scope(req, scope)
     min_duration = None
     if req.min_duration_ms is not None:
         min_duration = f"duration_nano > {int(req.min_duration_ms * 1_000_000)}"
@@ -302,12 +382,13 @@ def span_search_query(req: SpanSearchRequest) -> dict[str, Any]:
         "name": "A",
         "signal": "traces",
         "filter": filter_spec(
-            and_filters(
+            scoped(
+                scope,
                 f"service.name = {quote(req.service)}" if req.service else None,
                 f"name = {quote(req.operation)}" if req.operation else None,
                 "has_error = true" if req.errors_only else None,
                 min_duration,
-                user_filter=req.filter,
+                where=req.where,
             )
         ),
         "selectFields": [field_key(n, c) for n, c in SPAN_FIELDS],
@@ -318,16 +399,18 @@ def span_search_query(req: SpanSearchRequest) -> dict[str, Any]:
     return envelope(req.time_range, "raw", [builder_query(spec)])
 
 
-def trace_stats_query(req: TraceStatsRequest) -> dict[str, Any]:
+def trace_stats_query(req: TraceStatsRequest, scope: Scope) -> dict[str, Any]:
+    check_scope(req, scope)
     group = "service.name" if req.group_by == "service" else "name"
     spec = {
         "name": "A",
         "signal": "traces",
         "aggregations": [{"expression": e, "alias": a} for e, a in TRACE_STATS_AGGREGATIONS],
         "filter": filter_spec(
-            and_filters(
+            scoped(
+                scope,
                 f"service.name = {quote(req.service)}" if req.service else None,
-                user_filter=req.filter,
+                where=req.where,
             )
         ),
         "groupBy": [field_key(group, "resource" if group == "service.name" else "span")],
@@ -337,11 +420,13 @@ def trace_stats_query(req: TraceStatsRequest) -> dict[str, Any]:
     return envelope(req.time_range, "scalar", [builder_query(spec)])
 
 
-def trace_query(req: TraceRequest) -> dict[str, Any]:
+def trace_query(req: TraceRequest, scope: Scope) -> dict[str, Any]:
+    check_scope(req, scope)
+    # Spans from services outside the scope are excluded even when they share the trace.
     spec = {
         "name": "A",
         "signal": "traces",
-        "filter": filter_spec(f"trace_id = {quote(req.trace_id)}"),
+        "filter": filter_spec(scoped(scope, f"trace_id = {quote(req.trace_id)}")),
         "selectFields": [field_key(n, c) for n, c in SPAN_FIELDS],
         "order": [{"key": field_key("timestamp", "span"), "direction": "asc"}],
         "limit": MAX_TRACE_SPANS + 1,

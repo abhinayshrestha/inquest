@@ -1,4 +1,5 @@
 import uuid
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +19,14 @@ INITIAL_ROUND = 1
 
 
 class EnvironmentNotFound(Exception):
+    pass
+
+
+class InvestigationNotFound(Exception):
+    pass
+
+
+class InvalidTransition(Exception):
     pass
 
 
@@ -60,3 +69,34 @@ async def get_investigation(
             )
         )
     )
+
+
+async def start_investigation(session: AsyncSession, investigation_id: uuid.UUID) -> Investigation:
+    """pending -> investigating, and the current round's pending assignments -> running.
+
+    The minimal transition the future orchestrator will own; anything else is refused."""
+    investigation = await session.scalar(
+        select(Investigation)
+        .where(Investigation.id == investigation_id)
+        .options(selectinload(Investigation.assignments))
+        # Serializes concurrent starts: the second sees investigating and is refused.
+        .with_for_update()
+    )
+    if investigation is None:
+        raise InvestigationNotFound(investigation_id)
+    if investigation.status != InvestigationStatus.PENDING:
+        raise InvalidTransition(f"investigation is {investigation.status}, not pending")
+
+    current = [a for a in investigation.assignments if a.round == investigation.current_round]
+    for assignment in current:
+        if assignment.status != AssignmentStatus.PENDING:
+            raise InvalidTransition(f"assignment {assignment.id} is {assignment.status}")
+
+    now = datetime.now(UTC)
+    investigation.status = InvestigationStatus.INVESTIGATING
+    investigation.started_at = now
+    for assignment in current:
+        assignment.status = AssignmentStatus.RUNNING
+        assignment.started_at = now
+    await session.commit()
+    return investigation

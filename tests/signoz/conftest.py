@@ -5,11 +5,13 @@ from typing import Any
 
 import pytest
 
-from src.integrations.signoz.schemas import TimeRange
+from src.integrations.signoz.schemas import Scope, TimeRange
 from src.integrations.signoz.settings import SigNozSettings
 
 FIXTURES = Path(__file__).parent / "fixtures"
 TEST_API_KEY = "sz-test-key-0123456789abcdef"
+HOST_SCOPE = Scope(identity="host", values=("vm-1",))
+SERVICE_SCOPE = Scope(identity="service", values=("inquest-demo",))
 
 
 def load_fixture(name: str) -> dict[str, Any]:

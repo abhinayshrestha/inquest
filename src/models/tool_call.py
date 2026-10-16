@@ -67,6 +67,15 @@ class ToolCall(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "status",
             postgresql_where=text("status IN ('pending', 'running')"),
         ),
+        # One invocation per key per assignment: a replayed request returns the stored outcome
+        # instead of querying again. Rejected rows carry no key, so a retry is judged afresh.
+        Index(
+            "uq_tool_calls_assignment_id_idempotency_key",
+            "assignment_id",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("idempotency_key IS NOT NULL"),
+        ),
         CheckConstraint("attempt_number >= 1", name="attempt_number_positive"),
         CheckConstraint("duration_ms >= 0", name="duration_ms_nonnegative"),
         CheckConstraint(COMPLETED_AFTER_STARTED, name="completed_after_started"),
@@ -105,6 +114,8 @@ class ToolCall(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     output_metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     error_code: Mapped[str | None] = mapped_column(String(100))
     error_message: Mapped[str | None] = mapped_column(Text)
+    # Supplied by the agent framework (e.g. LangGraph's tool_call_id), never by model text.
+    idempotency_key: Mapped[str | None] = mapped_column(String(100))
     attempt_number: Mapped[int] = mapped_column(default=1, server_default=text("1"))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
