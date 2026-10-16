@@ -1,0 +1,48 @@
+{
+  "status": "success",
+  "data": {
+    "type": "raw",
+    "data": {
+      "results": [
+        {
+          "queryName": "A",
+          "nextCursor": "",
+          "rows": [
+            {
+              "timestamp": "2026-10-14T07:18:15.067Z",
+              "data": {
+                "timestamp": "2026-10-14T07:18:15.067Z",
+                "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+                "span_id": "00f067aa0ba902b7",
+                "parent_span_id": "",
+                "name": "GET /api/orders",
+                "kind_string": "Server",
+                "duration_nano": 2140500000,
+                "has_error": true,
+                "status_code_string": "Error",
+                "response_status_code": "500",
+                "service.name": "inquest-demo"
+              }
+            },
+            {
+              "timestamp": "2026-10-14T07:18:15.100Z",
+              "data": {
+                "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+                "span_id": "00f067aa0ba902b8",
+                "parent_span_id": "00f067aa0ba902b7",
+                "name": "pg.query",
+                "kind_string": "Client",
+                "duration_nano": 2000000000,
+                "has_error": false,
+                "status_code_string": "Unset",
+                "response_status_code": "",
+                "service.name": "inquest-demo"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "meta": {"rowsScanned": 900, "bytesScanned": 100000, "durationMs": 9}
+  }
+}

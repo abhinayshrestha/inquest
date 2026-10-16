@@ -1,0 +1,26 @@
+{
+  "status": "success",
+  "data": {
+    "type": "scalar",
+    "data": {
+      "results": [
+        {
+          "queryName": "A",
+          "columns": [
+            {"name": "name", "queryName": "A", "aggregationIndex": 0, "columnType": "group"},
+            {"name": "span_count", "queryName": "A", "aggregationIndex": 0, "columnType": "aggregation"},
+            {"name": "error_count", "queryName": "A", "aggregationIndex": 1, "columnType": "aggregation"},
+            {"name": "p50_duration", "queryName": "A", "aggregationIndex": 2, "columnType": "aggregation"},
+            {"name": "p95_duration", "queryName": "A", "aggregationIndex": 3, "columnType": "aggregation"},
+            {"name": "p99_duration", "queryName": "A", "aggregationIndex": 4, "columnType": "aggregation"}
+          ],
+          "data": [
+            ["GET /health", 900, 0, 1000000, 2000000, 3000000],
+            ["GET /api/orders", 412, 37, 42100000, 830000000, 2140500000]
+          ]
+        }
+      ]
+    },
+    "meta": {"rowsScanned": 1312, "bytesScanned": 50000, "durationMs": 15}
+  }
+}
