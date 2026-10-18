@@ -172,6 +172,36 @@ async def test_empty_result_without_any_telemetry(world: World):
     assert "Telemetry for this scope in the window: no." in result.summary
 
 
+async def test_service_log_probe_is_resource_scoped_and_establishes_no_coverage(world: World):
+    # Live regression: an unqualified service.name made SigNoz fall back to a JSON body
+    # search that failed with HTTP 500, so a service exporting no logs showed "unknown".
+    handler, seen = replies(EMPTY, EMPTY)
+    result = await world.run(
+        "signoz.log_volume",
+        {"time_range": window(), "identity": "service", "severity": ["ERROR"]},
+        handler,
+    )
+    assert (result.outcome, result.telemetry_available) == (Outcome.EMPTY, "no")
+    assert expression(seen[0]) == (
+        f"(resource.service.name IN ['{world.service}']) "
+        "AND severity_text IN ['ERROR', 'error', 'Error']"
+    )
+    assert expression(seen[1]) == f"(resource.service.name IN ['{world.service}'])"
+
+
+async def test_failed_log_probe_stays_unknown(world: World):
+    handler, seen = replies(EMPTY, 500)
+    result = await world.run(
+        "signoz.log_volume",
+        {"time_range": window(), "identity": "service", "severity": ["ERROR"]},
+        handler,
+    )
+    # A probe that could not run establishes nothing; "no" needs a successful zero count.
+    assert len(seen) == 2 and result.telemetry_available == "unknown"
+    (call,) = await world.tool_calls()
+    assert call.output_metadata_json["coverage_probe"]["error_code"] == "signoz_unavailable"
+
+
 async def test_probe_failure_never_fails_the_primary_query(world: World):
     handler, seen = replies(EMPTY, 503)
     result = await world.run("signoz.trace_stats", trace_stats_args(), handler)

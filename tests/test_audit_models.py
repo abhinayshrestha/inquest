@@ -21,12 +21,14 @@ from src.models import (
     ToolCategory,
     TriggerType,
 )
+from tests.records import add_assignment  # noqa: E402
 
 STARTED = datetime(2026, 10, 15, 1, 31, 2, tzinfo=UTC)
 
 
 async def _assignment(session: AsyncSession) -> InvestigationAssignment:
-    assignment = InvestigationAssignment(
+    assignment = await add_assignment(
+        session,
         investigation=Investigation(
             title="API latency spike",
             question="Why did /checkout p99 latency spike?",
@@ -36,7 +38,6 @@ async def _assignment(session: AsyncSession) -> InvestigationAssignment:
         round=1,
         objective="Find the slow span in /checkout traces",
     )
-    session.add(assignment)
     await session.flush()
     return assignment
 

@@ -259,8 +259,8 @@ def test_log_search_uses_convenience_filters_and_fetches_one_extra(time_range):
     (spec,) = specs(body)
     assert body["requestType"] == "raw"
     assert spec["filter"]["expression"] == (
-        "(host.name IN ['vm-1']) AND host.name = 'vm-1' AND log.file.name = 'syslog' "
-        "AND body CONTAINS 'oom'"
+        "(resource.host.name IN ['vm-1']) AND resource.host.name = 'vm-1' "
+        "AND log.file.name = 'syslog' AND body CONTAINS 'oom'"
     )
     assert (spec["limit"], spec["offset"]) == (21, 40)
     assert "selectFields" not in spec
@@ -283,7 +283,27 @@ def test_log_volume_counts_per_step_with_gap_filling(time_range):
     assert spec["aggregations"] == [{"expression": "count()", "alias": "log_count"}]
     assert spec["groupBy"] == [{"name": "log.file.name"}]
     assert spec["filter"]["expression"] == (
-        "(host.name IN ['vm-1']) AND body CONTAINS 'error' AND severity_text IN ['ERROR']"
+        "(resource.host.name IN ['vm-1']) AND body CONTAINS 'error' "
+        "AND severity_text IN ['ERROR', 'error', 'Error']"
+    )
+
+
+def test_severity_matches_every_common_spelling():
+    assert builders.severity_variants(["error", "WARN"]) == [
+        "error", "ERROR", "Error", "WARN", "warn", "Warn",
+    ]  # fmt: skip
+
+
+def test_severity_stays_after_the_scope_clause(time_range):
+    body, _ = builders.log_volume_query(
+        LogVolumeRequest(time_range=time_range, identity="service", severity=["error"]),
+        SERVICE_SCOPE,
+    )
+    (spec,) = specs(body)
+    # ANDed after the scope clause: severity can only narrow, never widen.
+    assert spec["filter"]["expression"] == (
+        "(resource.service.name IN ['inquest-demo']) "
+        "AND severity_text IN ['error', 'ERROR', 'Error']"
     )
 
 
@@ -292,7 +312,25 @@ def test_service_logs_are_scoped_by_service(time_range):
         LogVolumeRequest(time_range=time_range, identity="service"), SERVICE_SCOPE
     )
     (spec,) = specs(body)
-    assert spec["filter"]["expression"] == "(service.name IN ['inquest-demo'])"
+    # Resource-qualified: unqualified, SigNoz falls back to a JSON body search that fails
+    # with HTTP 500 when no log carries service.name.
+    assert spec["filter"]["expression"] == "(resource.service.name IN ['inquest-demo'])"
+
+
+def test_log_scope_keeps_deployment_environment_on_the_resource(time_range):
+    scope = Scope(identity="service", values=("api",), deployment_environment="prod")
+    body, _ = builders.log_volume_query(
+        LogVolumeRequest(time_range=time_range, identity="service", service="api"), scope
+    )
+    (spec,) = specs(body)
+    assert spec["filter"]["expression"] == (
+        "(resource.service.name IN ['api'] AND resource.deployment.environment = 'prod') "
+        "AND resource.service.name = 'api'"
+    )
+
+
+def test_traces_and_metrics_keep_unqualified_scope_keys():
+    assert builders.scope_clause(SCOPES["host"]) == "(host.name IN ['vm-1'])"
 
 
 def test_span_search_selects_intrinsic_fields(time_range):

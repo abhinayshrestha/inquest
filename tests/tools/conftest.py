@@ -24,11 +24,16 @@ from src.models import (
     Evidence,
     Investigation,
     InvestigationAssignment,
+    InvestigationEnvironment,
+    InvestigationReport,
     InvestigationStatus,
+    InvestigationTurn,
+    ProgressEvent,
     ToolCall,
     TriggerType,
 )
 from src.tools import ExecutionContext, ToolExecutionResult, execute_tool
+from tests.records import add_assignment
 from tests.signoz.conftest import TEST_API_KEY, load_fixture
 
 SETTINGS = SigNozSettings(base_url="http://signoz.test", api_key=TEST_API_KEY)
@@ -159,7 +164,8 @@ async def make_world() -> AsyncIterator[WorldFactory]:
         scope = {"hosts": [host], "services": [service]} if signoz == "default" else signoz
         metadata = {} if scope is None else {"signoz": scope}
         async with SessionLocal() as s, s.begin():
-            assignment = InvestigationAssignment(
+            assignment = await add_assignment(
+                s,
                 investigation=Investigation(
                     title="Checkout errors",
                     question="Why is /checkout failing?",
@@ -176,7 +182,6 @@ async def make_world() -> AsyncIterator[WorldFactory]:
                 objective="Find the failing span",
                 status=assignment_status,
             )
-            s.add(assignment)
             await s.flush()
             world = World(
                 assignment.investigation_id, assignment.environment_id, assignment.id, host, service
@@ -196,14 +201,31 @@ async def make_world() -> AsyncIterator[WorldFactory]:
 
     async with SessionLocal() as s, s.begin():
         assignments = [w.assignment_id for w in created]
+        investigations = [w.investigation_id for w in created]
+        await s.execute(
+            delete(ProgressEvent).where(ProgressEvent.investigation_id.in_(investigations))
+        )
+        await s.execute(
+            delete(InvestigationReport).where(
+                InvestigationReport.investigation_id.in_(investigations)
+            )
+        )
         await s.execute(delete(Evidence).where(Evidence.assignment_id.in_(assignments)))
         await s.execute(delete(ToolCall).where(ToolCall.assignment_id.in_(assignments)))
         await s.execute(
-            delete(InvestigationAssignment).where(InvestigationAssignment.id.in_(assignments))
+            delete(InvestigationAssignment).where(
+                InvestigationAssignment.investigation_id.in_(investigations)
+            )
         )
         await s.execute(
-            delete(Investigation).where(Investigation.id.in_([w.investigation_id for w in created]))
+            delete(InvestigationTurn).where(InvestigationTurn.investigation_id.in_(investigations))
         )
+        await s.execute(
+            delete(InvestigationEnvironment).where(
+                InvestigationEnvironment.investigation_id.in_(investigations)
+            )
+        )
+        await s.execute(delete(Investigation).where(Investigation.id.in_(investigations)))
         await s.execute(
             delete(Environment).where(Environment.id.in_([w.environment_id for w in created]))
         )

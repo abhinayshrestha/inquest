@@ -1,4 +1,3 @@
-import uuid
 from typing import Any
 
 import pytest
@@ -22,8 +21,8 @@ from src.models import (
     ImmutableRecordError,
     Investigation,
     InvestigationAssignment,
-    TriggerType,
 )
+from tests.records import add_assignment  # noqa: E402
 
 KINDS = ["hypothesis", "finding"]
 
@@ -34,19 +33,9 @@ async def _assignment(
     environment: Environment | None = None,
     round: int = 1,
 ) -> InvestigationAssignment:
-    assignment = InvestigationAssignment(
-        investigation=investigation
-        or Investigation(
-            title="API latency spike",
-            question="Why did /checkout p99 latency spike?",
-            trigger_type=TriggerType.MANUAL,
-        ),
-        environment=environment
-        or Environment(name=f"env-{uuid.uuid4().hex[:8]}", type=EnvironmentType.LOCAL),
-        round=round,
-        objective="Investigate inquest-demo /checkout latency",
+    assignment = await add_assignment(
+        session, investigation=investigation, environment=environment, round=round
     )
-    session.add(assignment)
     await session.flush()
     return assignment
 

@@ -1,8 +1,9 @@
+import uuid
 from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import CheckConstraint, DateTime, String, Text, text
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -16,6 +17,8 @@ from src.db.base import (
 
 if TYPE_CHECKING:
     from src.models.assignment import InvestigationAssignment
+    from src.models.environment import Environment
+    from src.models.turn import InvestigationTurn
 
 
 class InvestigationStatus(StrEnum):
@@ -23,6 +26,9 @@ class InvestigationStatus(StrEnum):
     PENDING = "pending"
     INVESTIGATING = "investigating"
     CORRELATING = "correlating"
+    # The latest turn finished and a report exists; follow-up questions are accepted (D016).
+    IDLE = "idle"
+    # Closed: no further follow-ups.
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -69,3 +75,32 @@ class Investigation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     assignments: Mapped[list["InvestigationAssignment"]] = relationship(
         back_populates="investigation", passive_deletes="all", lazy="raise"
     )
+    turns: Mapped[list["InvestigationTurn"]] = relationship(
+        back_populates="investigation",
+        order_by="InvestigationTurn.seq",
+        passive_deletes="all",
+        lazy="raise",
+    )
+    environments: Mapped[list["InvestigationEnvironment"]] = relationship(
+        back_populates="investigation", passive_deletes="all", lazy="raise"
+    )
+
+
+class InvestigationEnvironment(Base):
+    """An environment in an investigation's scope. Assignments may only target these (a
+    composite FK on investigation_assignments enforces it)."""
+
+    __tablename__ = "investigation_environments"
+
+    investigation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("investigations.id", ondelete="RESTRICT"), primary_key=True
+    )
+    environment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("environments.id", ondelete="RESTRICT"), primary_key=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    investigation: Mapped["Investigation"] = relationship(
+        back_populates="environments", lazy="raise"
+    )
+    environment: Mapped["Environment"] = relationship(lazy="raise")

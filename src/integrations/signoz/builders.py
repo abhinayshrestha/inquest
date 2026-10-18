@@ -189,10 +189,15 @@ def render_condition(condition: Condition) -> str:
     return f"{condition.key} {op} {literal(condition.value)}"
 
 
-def scope_clause(scope: Scope) -> str:
-    clause = f"{IDENTITY_KEYS[scope.identity]} IN [" + ", ".join(map(quote, scope.values)) + "]"
+def scope_clause(scope: Scope, *, context: str | None = None) -> str:
+    prefix = f"{context}." if context else ""
+    clause = (
+        f"{prefix}{IDENTITY_KEYS[scope.identity]} IN [" + ", ".join(map(quote, scope.values)) + "]"
+    )
     if scope.deployment_environment:
-        clause += f" AND {DEPLOYMENT_ENVIRONMENT_KEY} = {quote(scope.deployment_environment)}"
+        clause += (
+            f" AND {prefix}{DEPLOYMENT_ENVIRONMENT_KEY} = {quote(scope.deployment_environment)}"
+        )
     return f"({clause})"
 
 
@@ -201,10 +206,15 @@ def and_filters(*parts: str | None) -> str | None:
     return " AND ".join(p for p in parts if p) or None
 
 
-def scoped(scope: Scope, *parts: str | None, where: list[Condition] | None = None) -> str:
+def scoped(
+    scope: Scope,
+    *parts: str | None,
+    where: list[Condition] | None = None,
+    context: str | None = None,
+) -> str:
     # The scope clause comes first and is always present: no query leaves here unscoped.
     rendered = [render_condition(c) for c in where or []]
-    return " AND ".join(p for p in (scope_clause(scope), *parts, *rendered) if p)
+    return " AND ".join(p for p in (scope_clause(scope, context=context), *parts, *rendered) if p)
 
 
 def required_identity(req: object) -> Identity:
@@ -311,19 +321,39 @@ def metric_query(
     return envelope(req.time_range, "time_series", queries), label, preset.unit, step
 
 
+def severity_variants(values: list[str]) -> list[str]:
+    """severity_text matching is case-sensitive in SigNoz and sources disagree on case
+    (ERROR, error, Error); match all three spellings of each requested level."""
+    variants: list[str] = []
+    for value in values:
+        for v in (value, value.upper(), value.lower(), value.capitalize()):
+            if v not in variants:
+                variants.append(v)
+    return variants
+
+
 def log_filter(req: LogFilters, scope: Scope) -> str:
     check_scope(req, scope)
     severity = None
     if req.severity:
-        severity = "severity_text IN [" + ", ".join(quote(s) for s in req.severity) + "]"
+        severity = (
+            "severity_text IN ["
+            + ", ".join(quote(s) for s in severity_variants(req.severity))
+            + "]"
+        )
+    # Identity keys are pinned to the resource context for logs. Unqualified, SigNoz also
+    # searches attributes and the JSON body when no log carries the key (e.g. a service
+    # that exports no logs), and that fallback fails with HTTP 500 on our ClickHouse. OTel
+    # puts host.name and service.name on the resource, so this is also the stricter match.
     return scoped(
         scope,
-        f"host.name = {quote(req.host)}" if req.host else None,
-        f"service.name = {quote(req.service)}" if req.service else None,
+        f"resource.host.name = {quote(req.host)}" if req.host else None,
+        f"resource.service.name = {quote(req.service)}" if req.service else None,
         f"log.file.name = {quote(req.log_file)}" if req.log_file else None,
         f"body CONTAINS {quote(req.body_contains)}" if req.body_contains else None,
         severity,
         where=req.where,
+        context="resource",
     )
 
 

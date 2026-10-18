@@ -86,8 +86,12 @@ TOOLS: dict[str, ToolSpec] = {
         ToolSpec(
             "signoz.query_metrics",
             "Summarize one metric over a time window (min/max/mean/median/last per series). "
-            "Host presets are scoped by host; http_server_p99_seconds and service custom "
-            "metrics are scoped by service." + _SCOPE_NOTE,
+            "Prefer `metric` presets: host-scoped cpu_utilization, memory_utilization, "
+            "memory_used_bytes, load_average_1m, disk_io_bytes_rate, disk_operations_rate, "
+            "filesystem_utilization, network_io_bytes_rate, network_errors_rate, "
+            "network_dropped_rate; service-scoped http_server_p99_seconds. Use `custom` only "
+            "with an exact metric name already seen in results; a guessed name returns no "
+            "data." + _SCOPE_NOTE,
             MetricQueryRequest,
             query_metrics,
             lambda d: bool(d.series),
@@ -96,8 +100,11 @@ TOOLS: dict[str, ToolSpec] = {
         ),
         ToolSpec(
             "signoz.search_logs",
-            "Fetch one page of matching log records (redacted, clipped). identity='host' for "
-            "system logs, 'service' for application logs. Use log_volume for counts." + _SCOPE_NOTE,
+            "Fetch one page of matching log records (redacted, clipped). identity='host' "
+            "(default): system logs of the environment's hosts (syslog, auth.log); narrow with "
+            "`host`. identity='service': application logs, present only if the application "
+            "exports logs; narrow with `service`. Never set `service` with identity='host'. "
+            "Use log_volume for counts." + _SCOPE_NOTE,
             LogSearchRequest,
             search_logs,
             lambda d: bool(d.records),
@@ -106,7 +113,10 @@ TOOLS: dict[str, ToolSpec] = {
         ),
         ToolSpec(
             "signoz.log_volume",
-            "Count matching logs per time step, optionally grouped, to find spikes." + _SCOPE_NOTE,
+            "Count matching logs per time step, optionally grouped, to find spikes. Same "
+            "identity rules as search_logs: identity='host' (default) for system logs, "
+            "identity='service' for application logs; narrow only with the matching field."
+            + _SCOPE_NOTE,
             LogVolumeRequest,
             log_volume,
             lambda d: d.total_count > 0,
@@ -125,8 +135,8 @@ TOOLS: dict[str, ToolSpec] = {
         ),
         ToolSpec(
             "signoz.trace_stats",
-            "Span count, error rate and p50/p95/p99 latency grouped by service or operation."
-            + _SCOPE_NOTE,
+            "Span count, error rate and p50/p95/p99 latency grouped by service or operation. "
+            "Start here to learn the real operation (endpoint) names." + _SCOPE_NOTE,
             TraceStatsRequest,
             trace_stats,
             lambda d: bool(d.groups),

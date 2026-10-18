@@ -4,7 +4,15 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from src.models import AssignmentStatus, InvestigationStatus, Severity, TriggerType
+from src.models import (
+    AssignmentStatus,
+    InvestigationStatus,
+    Severity,
+    TriggerType,
+    TurnDecision,
+    TurnKind,
+    TurnStatus,
+)
 from src.schemas.environment import EnvironmentSummary
 
 
@@ -19,6 +27,7 @@ class AssignmentRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
+    turn_id: uuid.UUID
     round: int
     objective: str
     status: AssignmentStatus
@@ -27,6 +36,43 @@ class AssignmentRead(BaseModel):
     created_at: datetime
     updated_at: datetime
     environment: EnvironmentSummary
+
+
+class TurnRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    seq: int
+    kind: TurnKind
+    question: str
+    status: TurnStatus
+    decision: TurnDecision | None
+    answer_json: dict[str, Any] | None
+    error_code: str | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    created_at: datetime
+
+
+class ReportRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    turn_id: uuid.UUID
+    version: int
+    report_json: dict[str, Any]
+    created_at: datetime
+
+
+class ProgressEventRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    turn_id: uuid.UUID | None
+    assignment_id: uuid.UUID | None
+    type: str
+    payload_json: dict[str, Any]
+    created_at: datetime
 
 
 class InvestigationRead(BaseModel):
@@ -46,3 +92,4 @@ class InvestigationRead(BaseModel):
     created_at: datetime
     updated_at: datetime
     assignments: list[AssignmentRead]
+    turns: list[TurnRead]

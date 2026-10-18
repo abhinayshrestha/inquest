@@ -42,6 +42,8 @@ class McpSettings(BaseSettings):
     token_ttl_seconds: int = Field(default=900, gt=0, le=3600)
     # Host header allowlist (DNS rebinding protection); "host:*" allows any port.
     allowed_hosts: list[str] = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+    # Where investigator runtimes reach this server: loopback into the same backend (D010).
+    url: str = "http://127.0.0.1:8000/mcp/"
 
 
 class TokenConfigError(Exception):

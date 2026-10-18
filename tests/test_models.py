@@ -16,6 +16,7 @@ from src.models import (
     InvestigationStatus,
     TriggerType,
 )
+from tests.records import add_assignment  # noqa: E402
 
 STARTED = datetime(2026, 10, 15, 1, 0, tzinfo=UTC)
 
@@ -27,12 +28,13 @@ async def _seed(session: AsyncSession) -> tuple[Environment, Investigation]:
         question="Why did /checkout p99 latency spike?",
         trigger_type=TriggerType.MANUAL,
     )
-    investigation.assignments.append(
-        InvestigationAssignment(
-            environment=environment, round=1, objective="Check host CPU and memory pressure"
-        )
+    await add_assignment(
+        session,
+        investigation=investigation,
+        environment=environment,
+        round=1,
+        objective="Check host CPU and memory pressure",
     )
-    session.add_all([environment, investigation])
     await session.flush()
     return environment, investigation
 
@@ -104,13 +106,8 @@ async def test_invalid_enum_value_rejected_by_database(session: AsyncSession) ->
 
 async def test_round_must_be_positive(session: AsyncSession) -> None:
     environment, investigation = await _seed(session)
-    session.add(
-        InvestigationAssignment(
-            investigation_id=investigation.id,
-            environment_id=environment.id,
-            round=0,
-            objective="invalid",
-        )
+    await add_assignment(
+        session, investigation=investigation, environment=environment, round=0, objective="x"
     )
 
     with pytest.raises(IntegrityError, match="ck_investigation_assignments_round_positive"):
