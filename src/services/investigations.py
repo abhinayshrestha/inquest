@@ -1,7 +1,7 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -100,3 +100,32 @@ async def start_investigation(session: AsyncSession, investigation_id: uuid.UUID
         assignment.started_at = now
     await session.commit()
     return investigation
+
+
+FINAL_ASSIGNMENT_STATUSES = frozenset(
+    {
+        AssignmentStatus.COMPLETED,
+        AssignmentStatus.FAILED,
+        AssignmentStatus.TIMED_OUT,
+        AssignmentStatus.CANCELLED,
+    }
+)
+
+
+async def finish_assignment(
+    session: AsyncSession, assignment_id: uuid.UUID, status: AssignmentStatus
+) -> bool:
+    """running -> a final status. False if the assignment was no longer running (someone
+    else, e.g. a cancel, already closed it); that outcome is left alone."""
+    if status not in FINAL_ASSIGNMENT_STATUSES:
+        raise InvalidTransition(f"{status} is not a final assignment status")
+    result = await session.execute(
+        update(InvestigationAssignment)
+        .where(
+            InvestigationAssignment.id == assignment_id,
+            InvestigationAssignment.status == AssignmentStatus.RUNNING,
+        )
+        .values(status=status, completed_at=datetime.now(UTC))
+    )
+    await session.commit()
+    return result.rowcount == 1  # type: ignore[attr-defined]
