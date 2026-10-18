@@ -5,10 +5,26 @@ from src.models.environment import Environment, EnvironmentStatus, EnvironmentTy
 from src.models.evidence import Evidence, EvidenceStance, EvidenceType
 from src.models.finding import Finding, FindingEvidence, FindingStatus
 from src.models.hypothesis import Hypothesis, HypothesisEvidence, HypothesisStatus
-from src.models.investigation import Investigation, InvestigationStatus, Severity, TriggerType
+from src.models.investigation import (
+    Investigation,
+    InvestigationEnvironment,
+    InvestigationStatus,
+    Severity,
+    TriggerType,
+)
+from src.models.progress_event import ProgressEvent
+from src.models.report import InvestigationReport
 from src.models.tool_call import ToolCall, ToolCallStatus, ToolCategory
+from src.models.turn import (
+    ACTIVE_TURN_STATUSES,
+    InvestigationTurn,
+    TurnDecision,
+    TurnKind,
+    TurnStatus,
+)
 
 __all__ = [
+    "ACTIVE_TURN_STATUSES",
     "AssignmentStatus",
     "Base",
     "Environment",
@@ -26,10 +42,17 @@ __all__ = [
     "ImmutableRecordError",
     "Investigation",
     "InvestigationAssignment",
+    "InvestigationEnvironment",
+    "InvestigationReport",
     "InvestigationStatus",
+    "InvestigationTurn",
+    "ProgressEvent",
     "Severity",
     "ToolCall",
     "ToolCallStatus",
     "ToolCategory",
     "TriggerType",
+    "TurnDecision",
+    "TurnKind",
+    "TurnStatus",
 ]
