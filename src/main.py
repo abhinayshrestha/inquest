@@ -5,6 +5,7 @@ from fastapi import FastAPI
 
 from src.api.routes import environments, health, investigations
 from src.db.session import engine
+from src.investigators import runtime
 from src.mcp_server import build_mcp_app
 
 
@@ -14,7 +15,7 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         # A mounted app's own lifespan never runs, so the MCP session manager starts here.
-        async with mcp_server.session_manager.run():
+        async with mcp_server.session_manager.run(), runtime.lifespan():
             yield
         await engine.dispose()
 

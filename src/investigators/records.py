@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.investigators import policy
 from src.investigators.refs import ref, ref_index
 from src.investigators.validation import EvidenceFacts, Known
+from src.investigators.windows import parse_range
 from src.models import (
     Environment,
     Evidence,
@@ -29,6 +30,9 @@ from src.models import (
     HypothesisStatus,
     Investigation,
     InvestigationAssignment,
+    InvestigationEnvironment,
+    InvestigationReport,
+    InvestigationTurn,
 )
 from src.tools.scope import SCOPE_KEY
 
@@ -143,6 +147,19 @@ async def prior_findings(
     return [{"title": f.title, "status": f.status.value, "summary": _clip(f.summary)} for f in rows]
 
 
+# What an evidence row can show about time and entities, from the shape of its data alone
+# (no payload is loaded for this). See validation.EvidenceFacts.granularity.
+_DATA = Evidence.data_json["data"]
+GRANULARITY = case(
+    (_DATA.has_key("groups"), "aggregate"),
+    (_DATA.has_key("series"), "series"),
+    (_DATA.has_key("records"), "events"),
+    (_DATA.has_key("spans"), "trace"),
+    (_DATA.has_key("trace_id"), "trace"),
+    else_="aggregate",
+)
+
+
 def _samples(data_json: dict[str, Any] | None) -> dict[str, int]:
     data = (data_json or {}).get("data") or {}
     if isinstance(data.get("groups"), list):
@@ -162,6 +179,8 @@ async def known_refs(session: AsyncSession, assignment: InvestigationAssignment)
                 Evidence.summary,
                 # Only trace evidence needs its data (span counts); skip the rest.
                 case((Evidence.evidence_type == EvidenceType.TRACE, Evidence.data_json)),
+                GRANULARITY,
+                Evidence.data_json["time_range"],
             ).where(
                 Evidence.investigation_id == assignment.investigation_id,
                 Evidence.environment_id == assignment.environment_id,
@@ -170,12 +189,12 @@ async def known_refs(session: AsyncSession, assignment: InvestigationAssignment)
     ).all()
     own = (
         await session.execute(
-            select(Hypothesis.id, Hypothesis.status).where(
+            select(Hypothesis.id, Hypothesis.status, Hypothesis.statement).where(
                 Hypothesis.assignment_id == assignment.id
             )
         )
     ).all()
-    hypothesis_ids = [h for h, _ in own]
+    hypothesis_ids = [h for h, _, _ in own]
     links = await session.execute(
         select(
             HypothesisEvidence.hypothesis_id,
@@ -189,11 +208,16 @@ async def known_refs(session: AsyncSession, assignment: InvestigationAssignment)
         links={(h, e): s.value for h, e, s in links},
         facts={
             e_id: EvidenceFacts(
-                type=e_type.value, text=f"{title}\n{summary}", samples=_samples(data)
+                type=e_type.value,
+                text=f"{title}\n{summary}",
+                samples=_samples(data),
+                granularity=granularity,
+                window=parse_range(time_range),
             )
-            for e_id, e_type, title, summary, data in evidence
+            for e_id, e_type, title, summary, data, granularity, time_range in evidence
         },
-        hypothesis_status={h: s.value for h, s in own},
+        hypothesis_status={h: s.value for h, s, _ in own},
+        hypothesis_text={h: statement for h, _, statement in own},
     )
 
 
@@ -274,3 +298,193 @@ async def record_conclusion(
             insert(FindingEvidence).values(finding_links).on_conflict_do_nothing()
         )
     return ids
+
+
+async def investigation_memory(
+    session: AsyncSession, investigation_id: uuid.UUID
+) -> dict[str, Any]:
+    """Everything the Main Investigator may reason over, from PostgreSQL only: scope,
+    assignment history, findings with their evidence links, hypotheses, evidence
+    summaries. Raw telemetry (data_json) is read only for trace span counts."""
+    environments = (
+        (
+            await session.execute(
+                select(Environment)
+                .join(
+                    InvestigationEnvironment,
+                    InvestigationEnvironment.environment_id == Environment.id,
+                )
+                .where(InvestigationEnvironment.investigation_id == investigation_id)
+                .order_by(Environment.name)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    names = {e.id: e.name for e in environments}
+    assignments = (
+        (
+            await session.execute(
+                select(InvestigationAssignment)
+                .where(InvestigationAssignment.investigation_id == investigation_id)
+                .order_by(InvestigationAssignment.round, InvestigationAssignment.created_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    findings = (
+        (
+            await session.execute(
+                select(Finding)
+                .where(Finding.investigation_id == investigation_id)
+                .order_by(Finding.created_at, Finding.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    finding_links = (
+        await session.execute(
+            select(
+                FindingEvidence.finding_id, FindingEvidence.evidence_id, FindingEvidence.stance
+            ).where(FindingEvidence.investigation_id == investigation_id)
+        )
+    ).all()
+    hypotheses = (
+        (
+            await session.execute(
+                select(Hypothesis)
+                .where(Hypothesis.investigation_id == investigation_id)
+                .order_by(Hypothesis.created_at, Hypothesis.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    evidence = (
+        await session.execute(
+            select(
+                Evidence.id,
+                Evidence.environment_id,
+                Evidence.evidence_type,
+                Evidence.title,
+                Evidence.summary,
+                Evidence.collected_at,
+                case((Evidence.evidence_type == EvidenceType.TRACE, Evidence.data_json)),
+                # Only the queried window, for freshness; never the observations.
+                Evidence.data_json["time_range"],
+                GRANULARITY,
+            )
+            .where(Evidence.investigation_id == investigation_id)
+            .order_by(Evidence.collected_at.desc())
+        )
+    ).all()
+    turn_of = {a.id: a.turn_id for a in assignments}
+    links: dict[uuid.UUID, list[tuple[uuid.UUID, str]]] = {}
+    for finding_id, evidence_id, stance in finding_links:
+        links.setdefault(finding_id, []).append((evidence_id, stance.value))
+    return {
+        "environments": [
+            {"id": e.id, "name": e.name, "type": e.type.value, "scope": environment_scope(e)}
+            for e in environments
+        ],
+        "assignments": [
+            {
+                "round": a.round,
+                "environment": names.get(a.environment_id, "?"),
+                "status": a.status.value,
+                "objective": a.objective,
+            }
+            for a in assignments
+        ],
+        "findings": [
+            {
+                "id": f.id,
+                "environment": names.get(f.environment_id, "?"),
+                # The turn whose round produced it, for answers scoped to this turn.
+                "turn_id": turn_of.get(f.assignment_id),
+                "status": f.status.value,
+                "title": f.title,
+                "summary": f.summary,
+                "evidence": links.get(f.id, []),
+            }
+            for f in findings
+        ],
+        "hypotheses": [
+            {
+                "id": h.id,
+                "environment": names.get(h.environment_id, "?"),
+                "status": h.status.value,
+                "statement": h.statement,
+            }
+            for h in hypotheses
+        ],
+        "evidence": [
+            {
+                "id": e_id,
+                "environment": names.get(env_id, "?"),
+                "type": e_type.value,
+                "title": title,
+                "summary": summary,
+                "collected_at": collected_at,
+                "samples": _samples(data),
+                "window": parse_range(time_range),
+                "granularity": granularity,
+            }
+            for (
+                e_id,
+                env_id,
+                e_type,
+                title,
+                summary,
+                collected_at,
+                data,
+                time_range,
+                granularity,
+            ) in evidence
+        ],
+    }
+
+
+async def conversation(
+    session: AsyncSession, investigation_id: uuid.UUID, before_seq: int
+) -> dict[str, Any]:
+    """Earlier turns (question, outcome, answer) and the current report, for follow-ups.
+    Conversation and report are context; evidence and findings remain the only support."""
+    turns = (
+        (
+            await session.execute(
+                select(InvestigationTurn)
+                .where(
+                    InvestigationTurn.investigation_id == investigation_id,
+                    InvestigationTurn.seq < before_seq,
+                )
+                .order_by(InvestigationTurn.seq)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    report = await session.scalar(
+        select(InvestigationReport)
+        .where(InvestigationReport.investigation_id == investigation_id)
+        .order_by(InvestigationReport.version.desc())
+        .limit(1)
+    )
+    return {
+        "turns": [
+            {
+                "seq": t.seq,
+                "question": t.question,
+                "status": t.status.value,
+                "decision": t.decision.value if t.decision else None,
+                "error_code": t.error_code,
+                "answer_md": (t.answer_json or {}).get("answer_md", ""),
+            }
+            for t in turns
+        ],
+        "report": (
+            {"version": report.version, **report.report_json} if report is not None else None
+        ),
+    }

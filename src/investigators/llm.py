@@ -25,6 +25,9 @@ class NebiusSettings(BaseSettings):
     # Transient-error retries inside the client; graph-level retries come later.
     max_retries: int = Field(default=2, ge=0, le=5)
     max_output_tokens: int = Field(default=4096, gt=0)
+    # Nebius counts reasoning toward max_tokens; Ultra's reasoning plus a full report did
+    # not fit in 4096 in the first live run.
+    main_max_output_tokens: int = Field(default=16_384, gt=0)
 
 
 class NebiusConfigError(Exception):
@@ -44,13 +47,19 @@ def load_nebius_settings() -> NebiusSettings:
     return settings
 
 
-def chat_model(model: str, settings: NebiusSettings, *, temperature: float = 0.0) -> ChatOpenAI:
+def chat_model(
+    model: str,
+    settings: NebiusSettings,
+    *,
+    temperature: float = 0.0,
+    max_tokens: int | None = None,
+) -> ChatOpenAI:
     return ChatOpenAI(
         model=model,
         api_key=settings.api_key,
         base_url=settings.base_url,
         temperature=temperature,
-        max_tokens=settings.max_output_tokens,
+        max_tokens=max_tokens or settings.max_output_tokens,
         timeout=settings.timeout_seconds,
         max_retries=settings.max_retries,
         # Nebius serves Chat Completions; the Responses API is OpenAI-only.
@@ -64,7 +73,7 @@ def main_model(settings: NebiusSettings | None = None) -> ChatOpenAI:
     settings = settings or load_nebius_settings()
     if not settings.main_model:
         raise NebiusConfigError("NEBIUS_MAIN_MODEL is not set")
-    return chat_model(settings.main_model, settings)
+    return chat_model(settings.main_model, settings, max_tokens=settings.main_max_output_tokens)
 
 
 def local_model(settings: NebiusSettings | None = None) -> ChatOpenAI:

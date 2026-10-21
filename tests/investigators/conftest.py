@@ -45,6 +45,7 @@ class ScriptedModel:
         self.agent_prompts: list[list[Any]] = []
         self.structured_prompts: list[list[Any]] = []
         self.tools: list[dict[str, Any]] = []
+        self.methods: list[tuple[str, str]] = []
 
     def bind_tools(self, tools: list[dict[str, Any]]) -> "_Runnable":
         self.tools = tools
@@ -53,7 +54,8 @@ class ScriptedModel:
     def with_structured_output(
         self, schema: type, *, method: str, include_raw: bool
     ) -> "_Runnable":
-        assert method == "json_schema" and include_raw
+        assert method in ("json_schema", "function_calling") and include_raw
+        self.methods.append((schema.__name__, method))
         return _Runnable(self._structured)
 
     async def _next(self, queue: list[Script], messages: list[Any]) -> Any:

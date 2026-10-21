@@ -91,7 +91,8 @@ TOOLS: dict[str, ToolSpec] = {
             "filesystem_utilization, network_io_bytes_rate, network_errors_rate, "
             "network_dropped_rate; service-scoped http_server_p99_seconds. Use `custom` only "
             "with an exact metric name already seen in results; a guessed name returns no "
-            "data." + _SCOPE_NOTE,
+            "data. Do not guess runtime-specific metrics (JVM, GC, .NET, Go) for a service "
+            "whose telemetry has not shown that runtime." + _SCOPE_NOTE,
             MetricQueryRequest,
             query_metrics,
             lambda d: bool(d.series),

@@ -515,16 +515,63 @@ def summarize_spans(data: SpanData, time_range: TimeRange) -> str:
     )
 
 
+# Groups named first in a trace-stats summary. Models see summaries clipped (evidence
+# catalogs, investigation memory), so what matters must come before what does not.
+TRACE_ERROR_GROUPS = 3
+TRACE_SLOW_GROUPS = 3
+TRACE_LISTED_GROUPS = 10
+
+
+def _ms(value: float) -> str:
+    return f"{value:.1f}ms" if value < 100 else f"{value:.0f}ms"
+
+
+def _group_line(g: TraceGroupStats, *, errors: bool) -> str:
+    spans = f"{g.count} span{'' if g.count == 1 else 's'}"
+    if errors:
+        rate = f"{_num(g.error_rate * 100)}%"
+        return f"[{g.group}] {spans}, {g.error_count} errors ({rate}), p95 {_ms(g.p95_ms)}"
+    return f"[{g.group}] {spans}, p95 {_ms(g.p95_ms)}, p99 {_ms(g.p99_ms)}"
+
+
 def summarize_trace_stats(data: TraceStatsData, time_range: TimeRange) -> str:
+    """Totals, then the operations with errors (most errors first), then the slowest by
+    p95, then the rest by span count. Query order says nothing about importance: in the
+    first live run the only failing operation came last and was cut from model context."""
     head = f"trace stats by {data.group_by} {window(time_range)}: "
     if not data.groups:
         return head + "no spans."
-    lines = [
-        f"[{g.group}] {g.count} spans, {g.error_count} errors ({_num(g.error_rate * 100)}%), "
-        f"p50 {g.p50_ms}ms p95 {g.p95_ms}ms p99 {g.p99_ms}ms"
-        for g in data.groups[:5]
+    spans = sum(g.count for g in data.groups)
+    errors = sum(g.error_count for g in data.groups)
+    rate = f"{_num(errors / spans * 100)}%" if spans else "0%"
+    parts = [f"{len(data.groups)} groups, {spans} spans, {errors} errors ({rate})."]
+    failing = sorted(
+        (g for g in data.groups if g.error_count), key=lambda g: (-g.error_count, -g.error_rate)
+    )[:TRACE_ERROR_GROUPS]
+    if failing:
+        parts.append("Errors: " + "; ".join(_group_line(g, errors=True) for g in failing) + ".")
+    else:
+        parts.append("No span errors.")
+    listed = {g.group for g in failing}
+    slowest = [g for g in sorted(data.groups, key=lambda g: -g.p95_ms) if g.group not in listed][
+        :TRACE_SLOW_GROUPS
     ]
-    return finish(head + "; ".join(lines))
+    if slowest:
+        parts.append(
+            "Slowest p95: " + "; ".join(_group_line(g, errors=False) for g in slowest) + "."
+        )
+    listed |= {g.group for g in slowest}
+    rest = sorted((g for g in data.groups if g.group not in listed), key=lambda g: -g.count)
+    room = max(TRACE_LISTED_GROUPS - len(listed), 0)
+    if rest[:room]:
+        parts.append(
+            "Others: " + "; ".join(_group_line(g, errors=False) for g in rest[:room]) + "."
+        )
+    if len(rest) > room:
+        parts.append(f"+{len(rest) - room} more groups not listed.")
+    if data.has_more:
+        parts.append("More groups exist beyond this result.")
+    return finish(head + " ".join(parts))
 
 
 def summarize_trace(data: TraceData) -> str:
