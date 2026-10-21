@@ -17,7 +17,6 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, TypedDict
@@ -30,21 +29,22 @@ from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.runtime import Runtime
 from mcp import Client
-from pydantic import BaseModel
 
 from src.db.session import SessionLocal
-from src.investigators import context, policy, prompts, records
+from src.investigators import context, lifecycle, policy, prompts, records
 from src.investigators.checkpoint import thread_id
 from src.investigators.llm import local_model
 from src.investigators.mcp_tools import McpCallError, call_tool, connect, tool_specs
 from src.investigators.refs import ref
 from src.investigators.schemas import Conclusion, HypothesisPlan
+from src.investigators.structured import audit_line, structured_call, tokens_of
 from src.investigators.validation import (
     NOTE_PREFIX,
+    TOPICS,
     is_known_unavailable,
     objective_topics,
-    problem_codes,
     sanitize_note,
+    speculative_terms,
     unavailable_key,
     validate_conclusion,
     validate_plan,
@@ -53,6 +53,7 @@ from src.mcp_server import McpSettings
 from src.models import AssignmentStatus, InvestigationAssignment, InvestigationStatus
 from src.models.evidence import MAX_SUMMARY_CHARS
 from src.services.investigations import finish_assignment
+from src.services.progress import append_progress_event
 from src.tools.schemas import ToolExecutionResult
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,9 @@ class LocalContext:
 
 class LocalState(TypedDict, total=False):
     assignment_id: str
+    # For progress events; absent in checkpoints written before they existed.
+    investigation_id: str
+    turn_id: str
     objective: str
     # Epoch seconds; assignment.started_at + WALL_CLOCK_SECONDS.
     deadline: float
@@ -109,11 +113,6 @@ class AssignmentNotRunning(Exception):
 
 
 # --- helpers -------------------------------------------------------------------------------
-
-
-def _tokens(message: Any) -> int:
-    usage = getattr(message, "usage_metadata", None)
-    return int(usage.get("total_tokens", 0)) if usage else 0
 
 
 def _budget_stop(state: LocalState) -> str | None:
@@ -173,59 +172,6 @@ def normalize_reply(reply: AIMessage, history: list[AnyMessage]) -> AIMessage:
     )
 
 
-async def _structured[T](
-    model: BaseChatModel,
-    schema: type[BaseModel],
-    messages: list[AnyMessage],
-    check: Callable[[Any], tuple[T, list[str]]],
-    calls_left: int,
-    skip_repair: Callable[[Any], bool] = lambda _: False,
-) -> tuple[T | None, list[str], int, int, list[str]]:
-    """One structured call plus at most MAX_REPAIRS repairs. Returns the last cleaned
-    result (already safe: check() drops what it rejects), the remaining problems, the
-    model calls and tokens used, and the first attempt's problems (for the repair audit).
-    `skip_repair(parsed)` marks a draft the caller will discard, which is not worth a
-    repair call. Model exceptions propagate."""
-    runnable = model.with_structured_output(schema, method="json_schema", include_raw=True)
-    clean: T | None = None
-    problems: list[str] = []
-    first: list[str] | None = None
-    calls = tokens = 0
-    prompt = list(messages)
-    for _ in range(1 + policy.MAX_REPAIRS):
-        if calls >= calls_left:
-            break
-        out = await runnable.ainvoke(prompt)
-        calls += 1
-        tokens += _tokens(out["raw"])
-        if out["parsed"] is None:
-            problems = [
-                f"[schema] output did not match the JSON schema: {str(out['parsing_error'])[:300]}"
-            ]
-        else:
-            clean, problems = check(out["parsed"])
-        if first is None:
-            first = problems
-        if out["parsed"] is not None and skip_repair(out["parsed"]):
-            break
-        if not problems:
-            break
-        prompt = [
-            *prompt,
-            AIMessage(content=str(out["raw"].content)),
-            HumanMessage(prompts.REPAIR.format(problems="\n".join(f"- {p}" for p in problems))),
-        ]
-    return clean, problems, calls, tokens, first or []
-
-
-def _audit(stage: str, first: list[str], final: list[str]) -> str | None:
-    repaired = sorted(problem_codes(first) - problem_codes(final))
-    unresolved = sorted(problem_codes(final))
-    parts = [f"repaired {', '.join(repaired)}"] if repaired else []
-    parts += [f"unresolved {', '.join(unresolved)}"] if unresolved else []
-    return f"{stage}: {'; '.join(parts)}" if parts else None
-
-
 def _annotate(conclusion: dict[str, Any], line: str) -> None:
     for f in conclusion["findings"]:
         note = f"\n{NOTE_PREFIX}{line}"
@@ -264,6 +210,31 @@ def _bullets(lines: list[str]) -> str:
     return "\n".join(f"- {line}" for line in lines) if lines else "(none)"
 
 
+async def _emit(state: LocalState, events: list[tuple[str, dict[str, Any]]]) -> None:
+    """Progress events for this assignment. Best effort: a failure to record activity is
+    logged and never fails the investigation."""
+    if not events:
+        return
+    assignment_id = uuid.UUID(state["assignment_id"])
+    try:
+        async with SessionLocal() as s:
+            if state.get("investigation_id") and state.get("turn_id"):
+                investigation_id = uuid.UUID(state["investigation_id"])
+                turn_id = uuid.UUID(state["turn_id"])
+            else:
+                assignment = await s.get(InvestigationAssignment, assignment_id)
+                assert assignment is not None
+                investigation_id, turn_id = assignment.investigation_id, assignment.turn_id
+            for event_type, payload in events:
+                append_progress_event(
+                    s, investigation_id, event_type, payload,
+                    turn_id=turn_id, assignment_id=assignment_id,
+                )  # fmt: skip
+            await s.commit()
+    except Exception:
+        logger.warning("could not record progress events for %s", assignment_id)
+
+
 # --- nodes ---------------------------------------------------------------------------------
 
 
@@ -293,6 +264,8 @@ async def brief(state: LocalState) -> dict[str, Any]:
         now=now,
     )
     return {
+        "investigation_id": str(assignment.investigation_id),
+        "turn_id": str(assignment.turn_id),
         "objective": assignment.objective,
         "deadline": (started + timedelta(seconds=policy.WALL_CLOCK_SECONDS)).timestamp(),
         "messages": [SystemMessage(prompts.LOCAL_SYSTEM), HumanMessage(text)],
@@ -321,7 +294,7 @@ async def hypothesize(state: LocalState, runtime: Runtime[LocalContext]) -> dict
     # Names in hypotheses must come from what the model was shown.
     grounding = "\n".join(str(m.content) for m in state["messages"])
     try:
-        drafts, problems, calls, tokens, first = await _structured(
+        drafts, problems, calls, tokens, first = await structured_call(
             runtime.context.model,
             HypothesisPlan,
             [*state["messages"], HumanMessage(prompts.HYPOTHESIZE)],
@@ -333,7 +306,7 @@ async def hypothesize(state: LocalState, runtime: Runtime[LocalContext]) -> dict
         logger.warning("hypothesize model call failed: %s", type(exc).__name__)
         problems = [f"[model_error] hypothesize failed: {type(exc).__name__}"]
         drafts, calls, tokens, first = [], 1, 0, problems
-    audit = _audit("hypotheses", first, problems)
+    audit = audit_line("hypotheses", first, problems)
     return {
         "hypotheses": drafts or [],
         "validation_audit": state["validation_audit"] + ([audit] if audit else []),
@@ -349,6 +322,13 @@ async def record_hypotheses(state: LocalState) -> dict[str, Any]:
         assignment = await s.get(InvestigationAssignment, uuid.UUID(state["assignment_id"]))
         assert assignment is not None
         ids = await records.record_hypotheses(s, assignment, drafts)
+    await _emit(
+        state,
+        [
+            ("hypothesis.recorded", {"ref": ref("hypothesis", hid), "statement": d["statement"]})
+            for hid, d in zip(ids, drafts, strict=True)
+        ],
+    )
     lines = [
         f"{ref('hypothesis', hid)}: {d['statement']} (test: {d['test_plan']})"
         for hid, d in zip(ids, drafts, strict=True)
@@ -361,6 +341,8 @@ async def agent(state: LocalState, runtime: Runtime[LocalContext]) -> dict[str, 
     if not await _is_open(uuid.UUID(state["assignment_id"])):
         return {"stop_reason": ASSIGNMENT_CLOSED}
     if stop := _budget_stop(state):
+        if stop.startswith("budget:") and state.get("stop_reason") is None:
+            await _emit(state, [("budget.exhausted", {"scope": "local", "reason": stop})])
         return {"stop_reason": stop}
     model = runtime.context.model.bind_tools(runtime.context.tools)
     try:
@@ -372,7 +354,7 @@ async def agent(state: LocalState, runtime: Runtime[LocalContext]) -> dict[str, 
     update: dict[str, Any] = {
         "messages": [reply],
         "model_calls": state["model_calls"] + 1,
-        "tokens": state["tokens"] + _tokens(reply),
+        "tokens": state["tokens"] + tokens_of(reply),
     }
     if not (reply.tool_calls or reply.invalid_tool_calls):
         update["note"] = str(reply.content)[:NOTE_CHARS]
@@ -396,6 +378,14 @@ async def tools(state: LocalState, runtime: Runtime[LocalContext]) -> dict[str, 
             used += 1
             admitted.append(call)
     semaphore = asyncio.Semaphore(policy.MAX_PARALLEL_TOOL_CALLS)
+    await _emit(
+        state,
+        [
+            ("tool_call.started", {"tool": c["name"], "call_id": c["id"],
+                                   "arguments": _args_preview(c["args"])})
+            for c in admitted
+        ],
+    )  # fmt: skip
 
     async def run(call: dict[str, Any]) -> ToolExecutionResult | Exception:
         async with semaphore:
@@ -473,6 +463,25 @@ async def tools(state: LocalState, runtime: Runtime[LocalContext]) -> dict[str, 
                 artifact={"digest": "not run: invalid arguments"},
             )
         )
+    await _emit(
+        state,
+        [
+            ("tool_call.finished", {
+                "tool": call["name"],
+                "call_id": call["id"],
+                "status": str(outcome.status),
+                "outcome": str(outcome.outcome) if outcome.outcome else None,
+                "telemetry_available": outcome.telemetry_available,
+                "evidence": [ref("evidence", e) for e in outcome.evidence_ids],
+                "error_code": outcome.error.code if outcome.error else None,
+                "replayed": outcome.replayed,
+            } if isinstance(outcome, ToolExecutionResult) else {
+                "tool": call["name"], "call_id": call["id"], "status": "transport_error",
+            })
+            for call in admitted
+            for outcome in [outcomes[call["id"]]]
+        ],
+    )  # fmt: skip
     update: dict[str, Any] = {
         "messages": messages,
         "tool_calls": used,
@@ -517,19 +526,29 @@ async def conclude(state: LocalState, runtime: Runtime[LocalContext]) -> dict[st
         if stop
         else "",
         verdict_rule=prompts.VERDICT_FREE if may_continue else prompts.VERDICT_FINAL,
+        subjects=", ".join(TOPICS[t].label for t in known.topics) or "none beyond the objective",
     )
     calls_left = policy.MAX_MODEL_CALLS - state["model_calls"]
     update: dict[str, Any] = {}
 
+    grounding = "\n".join([str(m.content) for m in state["messages"][:2]] + list(state["tool_log"]))
+
     def pursuable(gaps: list[str]) -> list[str]:
-        return [g for g in gaps if g.strip() and not is_known_unavailable(g, unavailable)]
+        # Not known to be unavailable, and not chasing a runtime nothing has shown.
+        return [
+            g
+            for g in gaps
+            if g.strip()
+            and not is_known_unavailable(g, unavailable)
+            and not speculative_terms(g, grounding)
+        ]
 
     if state["tokens"] >= policy.MAX_TOKENS or calls_left <= 0:
         problems = ["[budget] model budget exhausted before concluding"]
         clean, calls, tokens, first = None, 0, 0, problems
     else:
         try:
-            clean, problems, calls, tokens, first = await _structured(
+            clean, problems, calls, tokens, first = await structured_call(
                 runtime.context.model,
                 Conclusion,
                 [SystemMessage(prompts.LOCAL_SYSTEM), HumanMessage(prompt)],
@@ -573,7 +592,7 @@ async def conclude(state: LocalState, runtime: Runtime[LocalContext]) -> dict[st
         clean["findings"] = _fallback_conclusion(state, "no finding produced")["findings"]
 
     audit = list(state["validation_audit"])
-    if entry := _audit("conclusion", first, problems):
+    if entry := audit_line("conclusion", first, problems):
         audit.append(entry)
     if any(note_changes.values()):
         audit.append(
@@ -591,7 +610,22 @@ async def record_conclusion(state: LocalState) -> dict[str, Any]:
     async with SessionLocal() as s, s.begin():
         assignment = await s.get(InvestigationAssignment, uuid.UUID(state["assignment_id"]))
         assert assignment is not None
-        await records.record_conclusion(s, assignment, state["conclusion"] or {})
+        conclusion = state["conclusion"] or {}
+        finding_ids = await records.record_conclusion(s, assignment, conclusion)
+    await _emit(
+        state,
+        [
+            ("hypothesis.updated", {"ref": ref("hypothesis", uuid.UUID(u["hypothesis_id"])),
+                                    "status": u["status"]})
+            for u in conclusion.get("hypothesis_updates", [])
+            if u["status"] is not None
+        ]
+        + [
+            ("finding.recorded", {"ref": ref("finding", fid), "status": f["status"],
+                                  "title": f["title"]})
+            for fid, f in zip(finding_ids, conclusion.get("findings", []), strict=True)
+        ],
+    )  # fmt: skip
     return {}
 
 
@@ -727,7 +761,9 @@ async def run_local_investigator(
                 logger.exception("local investigator %s failed", assignment_id)
             status = AssignmentStatus.TIMED_OUT if deadline.expired() else AssignmentStatus.FAILED
         except asyncio.CancelledError:
-            await asyncio.shield(_finish(assignment_id, AssignmentStatus.CANCELLED))
+            # Shutdown is not a cancel: leave the assignment running for recovery.
+            if not lifecycle.shutting_down():
+                await asyncio.shield(_finish(assignment_id, AssignmentStatus.CANCELLED))
             raise
         except Exception:
             # Exception text may carry provider or database details; log it, don't return it.

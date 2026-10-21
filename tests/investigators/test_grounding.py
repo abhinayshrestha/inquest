@@ -67,12 +67,20 @@ def update(h: uuid.UUID, status: str, *links: EvidenceLink) -> HypothesisUpdate:
     )  # type: ignore[arg-type]
 
 
-def finding(summary: str, *links: EvidenceLink, status="preliminary", h=None, title="Latency"):
+def finding(
+    summary: str,
+    *links: EvidenceLink,
+    status="preliminary",
+    h=None,
+    relation=None,
+    title="Latency",
+):
     return FindingDraft(
         title=title,
         summary=summary,
         status=status,  # type: ignore[arg-type]
         hypothesis_ref=ref("hypothesis", h) if h else None,
+        hypothesis_relation=relation,
         evidence=list(links),
     )
 
@@ -205,26 +213,119 @@ def test_mixed_evidence_may_stay_active():
 
 
 def test_finding_that_resolves_an_active_hypothesis_triggers_repair():
-    clean, problems = check(finding("/slow is slow (2 spans)", ev(TRACE), h=H1))
-    assert any("stays active" in p for p in problems)
-    assert clean["findings"][0]["hypothesis_id"] == str(H1)
-
-
-def test_finding_supporting_a_rejected_hypothesis_is_unlinked():
     clean, problems = check(
-        finding("/slow is slow (2 spans)", ev(TRACE), h=H1),
-        updates=[update(H1, "rejected", ev(CPU, "contradicts")), update(H2, "active")],
+        finding("/slow is slow (2 spans)", ev(TRACE), h=H1, relation="supports"),
+        updates=[update(H1, "active", ev(TRACE)), update(H2, "active")],
     )
-    assert any("they disagree" in p for p in problems)
-    assert clean["findings"][0]["hypothesis_id"] is None
+    assert "finding_hypothesis_active" in problem_codes(problems)
+    assert clean["findings"][0]["hypothesis_id"] == str(H1)
 
 
 def test_consistent_finding_and_hypothesis_pass():
     _, problems = check(
-        finding("/slow is slow (2 spans)", ev(TRACE), h=H1),
+        finding("/slow is slow (2 spans)", ev(TRACE), h=H1, relation="supports"),
         updates=[update(H1, "supported", ev(TRACE)), update(H2, "active")],
     )
     assert problems == []
+
+
+def test_finding_that_rules_a_cause_out_may_reference_the_rejected_hypothesis():
+    # Live run 3: "CPU is low" (confirmed) against "CPU saturation caused the latency".
+    clean, problems = check(
+        finding("CPU stays near 0.9%.", ev(CPU), status="confirmed", h=H2,
+                relation="contradicts", title="Host CPU"),
+        updates=[update(H1, "active"), update(H2, "rejected", ev(CPU, "contradicts"))],
+    )  # fmt: skip
+    assert problems == []
+    (f,) = clean["findings"]
+    assert (f["status"], f["hypothesis_id"]) == ("confirmed", str(H2))
+    assert clean["hypothesis_updates"][1]["status"] == "rejected"
+
+
+def test_finding_that_supports_a_rejected_hypothesis_is_a_conflict():
+    clean, problems = check(
+        finding("/slow is slow (2 spans)", ev(CPU), status="confirmed", h=H1,
+                relation="supports"),
+        updates=[update(H1, "rejected", ev(CPU, "contradicts")), update(H2, "active")],
+    )  # fmt: skip
+    assert "relation_conflict" in problem_codes(problems)
+    (f,) = clean["findings"]
+    assert f["hypothesis_id"] is None
+    # The contradicting link and the rejection are not kept as fact either.
+    (u, _) = clean["hypothesis_updates"]
+    assert (u["status"], u["evidence"]) == ("active", [])
+
+
+def test_relation_must_agree_with_the_evidence_links():
+    # Live run 3: the finding says errors do not coincide with latency, while its
+    # evidence was linked to that hypothesis as supporting it.
+    clean, problems = check(
+        finding("Errors and latency do not overlap (2 spans).", ev(TRACE), h=H1,
+                relation="contradicts"),
+        updates=[update(H1, "active", ev(TRACE)), update(H2, "active")],
+    )  # fmt: skip
+    assert "relation_conflict" in problem_codes(problems)
+    assert clean["findings"][0]["hypothesis_id"] is None
+    assert clean["hypothesis_updates"][0]["evidence"] == []
+
+
+def test_relation_without_linked_evidence_is_unlinked():
+    clean, problems = check(
+        finding("/slow is slow (2 spans)", ev(TRACE), h=H1, relation="supports"),
+        updates=[update(H1, "supported", ev(CPU)), update(H2, "active")],
+    )
+    assert "relation_unlinked" in problem_codes(problems)
+    assert clean["findings"][0]["hypothesis_id"] is None
+
+
+def test_missing_relation_is_unlinked():
+    clean, problems = check(finding("/slow is slow (2 spans)", ev(TRACE), h=H1))
+    assert "relation_missing" in problem_codes(problems)
+    assert clean["findings"][0]["hypothesis_id"] is None
+
+
+def test_inconclusive_relation_needs_no_status_change():
+    _, problems = check(
+        finding("Overlap unclear (2 spans).", ev(TRACE), status="inconclusive", h=H1,
+                relation="inconclusive"),
+    )  # fmt: skip
+    assert problems == []
+
+
+@pytest.mark.parametrize(
+    ("status", "links", "expected", "code"),
+    [
+        ("supported", ["supports"], "supported", None),
+        ("weakened", ["contradicts"], "weakened", None),
+        ("rejected", ["contradicts"], "rejected", None),
+        ("weakened", ["supports", "contradicts"], "weakened", None),  # mixed: allowed
+        ("active", ["supports", "contradicts"], "active", None),  # mixed: allowed
+        ("supported", ["supports", "contradicts"], "active", "mixed_supported"),
+        ("rejected", ["supports", "contradicts"], "weakened", "mixed_rejected"),
+    ],
+)
+def test_hypothesis_status_against_mixed_evidence(status, links, expected, code):
+    evidence = [ev(e, s) for e, s in zip((TRACE, CPU), links, strict=False)]
+    clean, problems = check(
+        finding("Latency (2 spans).", ev(TRACE)),
+        updates=[update(H1, status, *evidence), update(H2, "active")],
+    )
+    assert clean["hypothesis_updates"][0]["status"] == expected
+    assert (
+        (code in problem_codes(problems))
+        if code
+        else not ({"mixed_supported", "mixed_rejected"} & problem_codes(problems))
+    )
+
+
+def test_mixed_evidence_counts_links_already_stored():
+    clean, problems = check(
+        finding("Latency (2 spans).", ev(TRACE)),
+        updates=[update(H1, "supported", ev(TRACE)), update(H2, "active")],
+        links={(H1, CPU): "contradicts"},
+    )
+    assert "mixed_supported" in problem_codes(problems)
+    assert clean["hypothesis_updates"][0]["status"] == "active"
 
 
 # --- coverage gaps -------------------------------------------------------------------------
@@ -428,3 +529,46 @@ def test_unanswered_topic_without_evidence_says_not_observed():
     clean, _ = validate_conclusion(c, k)
     assert "Not observed" in clean["findings"][-1]["summary"]
     assert clean["findings"][-1]["evidence"] == []
+
+
+# --- critical evidence survives clipped model context --------------------------------------
+
+
+def _live_run_3_summary() -> str:
+    from datetime import UTC, datetime
+
+    from src.integrations.signoz import normalize
+    from src.integrations.signoz.schemas import TimeRange
+    from tests.signoz.test_normalize import LIVE_RUN_3_GROUPS, trace_stats
+
+    window = TimeRange(
+        start=datetime(2026, 10, 18, 2, 58, tzinfo=UTC),
+        end=datetime(2026, 10, 18, 3, 28, tzinfo=UTC),
+    )
+    return normalize.summarize_trace_stats(trace_stats(LIVE_RUN_3_GROUPS), window)
+
+
+def test_late_failing_operation_reaches_the_local_conclude_catalog():
+    from datetime import UTC, datetime
+
+    from src.investigators.context import evidence_lines
+    from src.investigators.records import _clip
+
+    now = datetime.now(UTC)
+    catalog = [{"ref": "ev_8d479c9c", "own": True, "type": "trace", "title": "Trace stats",
+                "summary": _clip(_live_run_3_summary()), "collected_at": now}]  # fmt: skip
+    (line,) = evidence_lines(catalog, now)
+    assert "[GET /error] 4 spans, 4 errors (100.0%)" in line
+    assert "[GET /slow] 1 span" in line
+
+
+def test_late_failing_operation_reaches_main_memory():
+    from src.investigators.context import memory_text
+
+    memory = {
+        "findings": [], "hypotheses": [], "assignments": [], "environments": [],
+        "evidence": [{"id": uuid.uuid4(), "environment": "ubuntu-vm", "type": "trace",
+                      "title": "Trace stats", "summary": _live_run_3_summary()}],
+    }  # fmt: skip
+    text = memory_text(memory, policy.MEMORY_CHARS)
+    assert "[GET /error] 4 spans, 4 errors (100.0%)" in text

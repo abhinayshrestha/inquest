@@ -90,6 +90,7 @@ def conclusion(world: World, *, status: str = "confirmed", evidence: str | None 
                     status=status,
                     confidence=0.8,
                     hypothesis_ref=h_ref(world, 0),
+                    hypothesis_relation="supports",
                     evidence=[EvidenceLink(evidence_ref=ev, stance="supports")],
                 )
             ],
@@ -638,3 +639,20 @@ async def test_cpu_and_memory_in_the_objective_are_always_answered(run, world: W
         assert "Not observed" in titles[topic].summary
     assert any("topic_unanswered" in p for p in result.problems)
     assert result.validation_audit == ["conclusion: unresolved topic_unanswered"]
+
+
+async def test_need_more_chasing_an_unobserved_runtime_does_not_loop(run, world: World, signoz):
+    # Phase 4 live run: a gap for `jvm_gc_pause_ms` on a Node.js service cost an extra
+    # agent loop and conclude call.
+    signoz("trace_stats_scalar.json")
+    model = ScriptedModel(
+        replies=[trace_stats(), "done"],
+        structured=[PLAN, lambda m: addressed(m, verdict="need_more",
+                                              gaps=["query jvm_gc_pause_ms for GC pauses"])],
+    )  # fmt: skip
+
+    result = await run(world, model)
+
+    assert result.status == AssignmentStatus.COMPLETED
+    assert len(model.agent_prompts) == 2 and result.tool_calls == 1
+    assert not any("gaps were identified" in str(p[-1].content) for p in model.agent_prompts)

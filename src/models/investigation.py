@@ -18,6 +18,7 @@ from src.db.base import (
 if TYPE_CHECKING:
     from src.models.assignment import InvestigationAssignment
     from src.models.environment import Environment
+    from src.models.report import InvestigationReport
     from src.models.turn import InvestigationTurn
 
 
@@ -83,6 +84,10 @@ class Investigation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     environments: Mapped[list["InvestigationEnvironment"]] = relationship(
         back_populates="investigation", passive_deletes="all", lazy="raise"
+    )
+    # Read-only: versions are written by services.turns, never through this collection.
+    reports: Mapped[list["InvestigationReport"]] = relationship(
+        order_by="InvestigationReport.version", viewonly=True, lazy="raise"
     )
 
 

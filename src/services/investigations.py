@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import set_committed_value
 
 from src.models import (
     AssignmentStatus,
@@ -127,6 +128,7 @@ async def create_investigation(session: AsyncSession, data: InvestigationCreate)
     )
     # One commit: no investigation without its scope, first turn and first assignment.
     await session.commit()
+    set_committed_value(investigation, "reports", [])  # a new investigation has none
     return investigation
 
 
@@ -141,6 +143,7 @@ async def get_investigation(
                 InvestigationAssignment.environment
             ),
             selectinload(Investigation.turns),
+            selectinload(Investigation.reports),
         )
     )
 

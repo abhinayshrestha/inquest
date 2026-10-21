@@ -64,6 +64,17 @@ class ReportRead(BaseModel):
     created_at: datetime
 
 
+class ReportRef(BaseModel):
+    """A report version without its body; fetch the body by version when needed."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    turn_id: uuid.UUID
+    version: int
+    created_at: datetime
+
+
 class ProgressEventRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -93,3 +104,24 @@ class InvestigationRead(BaseModel):
     updated_at: datetime
     assignments: list[AssignmentRead]
     turns: list[TurnRead]
+    reports: list[ReportRef]
+
+
+class FollowUpCreate(BaseModel):
+    question: str = Field(min_length=1, max_length=10_000)
+
+
+class TurnAccepted(BaseModel):
+    """202 for a turn accepted for execution; progress is on events_url."""
+
+    investigation_id: uuid.UUID
+    turn_id: uuid.UUID
+    seq: int
+    status: str = "queued"
+    events_url: str
+
+
+class TurnCancelled(BaseModel):
+    investigation_id: uuid.UUID
+    turn_id: uuid.UUID
+    status: str = "cancelled"

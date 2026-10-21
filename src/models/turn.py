@@ -101,6 +101,9 @@ class InvestigationTurn(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     decision: Mapped[TurnDecision | None] = mapped_column(str_enum(TurnDecision))
     answer_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     error_code: Mapped[str | None] = mapped_column(String(100))
+    # Set when the API accepted the turn for execution. Recovery starts pending turns
+    # that have it (accepted, never started) and never ones that lack it (created only).
+    run_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

@@ -706,3 +706,19 @@ async def test_rejected_request_does_not_consume_its_key(world: World):
     handler, _ = replies("trace_stats_scalar.json")
     accepted = await world.run("signoz.trace_stats", args, handler, key="lg-4")
     assert accepted.status is ToolCallStatus.SUCCEEDED and not accepted.replayed
+
+
+async def test_trace_stats_evidence_leads_with_the_failing_operation(world: World):
+    """Live run 3: GET /error (all spans failing) came last in SigNoz's rows and was cut
+    from model context. The stored evidence summary now names it first."""
+    payload = load_fixture("trace_stats_scalar.json")
+    rows = payload["data"]["data"]["results"][0]["data"]
+    quiet = [[f"GET /quiet-{i}", 500, 0, 1_000_000, 2_000_000, 3_000_000] for i in range(8)]
+    rows[:] = quiet + [["GET /error", 4, 4, 11_000_000, 14_600_000, 14_700_000]]
+    handler, _ = replies(payload)
+
+    result = await world.run("signoz.trace_stats", trace_stats_args(), handler)
+
+    (evidence,) = await world.evidence()
+    assert result.summary == evidence.summary
+    assert evidence.summary.index("Errors: [GET /error] 4 spans, 4 errors (100.0%)") < 200

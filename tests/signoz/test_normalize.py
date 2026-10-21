@@ -503,3 +503,58 @@ def test_missing_trace_is_not_found():
     assert data.completeness == TraceCompleteness.NOT_FOUND
     assert data.duration_ms is None
     assert "not found" in normalize.summarize_trace(data)
+
+
+# --- trace-stats summaries keep what matters first -----------------------------------------
+
+LIVE_RUN_3_GROUPS = [
+    # Query order from live run 3: the only failing operation came after the quiet ones.
+    ("GET /slow", 1, 0, 1514.5),
+    ("request handler - /slow", 2, 0, 1513.0),
+    ("middleware - patched", 12, 0, 687.8),
+    ("GET /", 1, 0, 16.4),
+    ("request handler - /", 2, 0, 15.6),
+    ("middleware - <anonymous>", 6, 0, 0.4),
+    ("request handler - /error", 8, 0, 0.3),
+    ("GET /error", 4, 4, 14.6),
+]
+
+
+def trace_stats(groups, has_more: bool = False):
+    from src.integrations.signoz.schemas import TraceGroupStats, TraceStatsData
+
+    return TraceStatsData(
+        group_by="operation",
+        has_more=has_more,
+        groups=[
+            TraceGroupStats(group=name, count=n, error_count=e, error_rate=round(e / n, 4),
+                            p50_ms=p95 / 2, p95_ms=p95, p99_ms=p95 * 1.01)
+            for name, n, e, p95 in groups
+        ],
+    )  # fmt: skip
+
+
+def test_errors_and_slowest_come_first_whatever_the_query_order(time_range):
+    summary = normalize.summarize_trace_stats(trace_stats(LIVE_RUN_3_GROUPS), time_range)
+
+    totals, rest = summary.split(": ", 1)[1].split(". ", 1)
+    assert totals == "8 groups, 36 spans, 4 errors (11.1111%)"
+    assert rest.startswith("Errors: [GET /error] 4 spans, 4 errors (100.0%), p95 14.6ms.")
+    assert "Slowest p95: [GET /slow] 1 span, p95 1514ms" in summary
+    # Everything important fits in the 400 characters models are shown.
+    assert summary.index("[GET /error]") < 200 and summary.index("Slowest p95") < 400
+
+
+def test_listing_is_bounded_and_says_what_was_left_out(time_range):
+    many = [(f"op-{i}", 100 + i, 0, 10.0) for i in range(20)] + [("op-bad", 5, 1, 9.0)]
+    summary = normalize.summarize_trace_stats(trace_stats(many, has_more=True), time_range)
+
+    assert summary.count("[op-") == normalize.TRACE_LISTED_GROUPS
+    assert "+11 more groups not listed." in summary
+    assert "More groups exist beyond this result." in summary
+    assert summary.index("[op-bad]") < summary.index("Slowest")
+
+
+def test_no_errors_is_said_explicitly(time_range):
+    summary = normalize.summarize_trace_stats(trace_stats([("GET /", 50, 0, 20.0)]), time_range)
+    assert "No span errors." in summary and "1 groups, 50 spans, 0 errors (0.0%)" in summary
