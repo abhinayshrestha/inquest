@@ -12,6 +12,8 @@ const InvestigationsPage = lazy(() => import('@/features/investigations/investig
 const InvestigationDetailPage = lazy(
   () => import('@/features/investigations/investigation-detail-page'),
 )
+const NewInvestigationPage = lazy(() => import('@/features/investigations/new-investigation-page'))
+const ReportPage = lazy(() => import('@/features/investigations/report-page'))
 const EnvironmentsPage = lazy(() => import('@/features/environments/environments-page'))
 const EnvironmentDetailPage = lazy(() => import('@/features/environments/environment-detail-page'))
 const ReportsPage = lazy(() => import('@/features/reports/reports-page'))
@@ -42,7 +44,9 @@ export const routes: RouteObject[] = [
     children: [
       page(undefined, OverviewPage, 'cards'),
       page('investigations', InvestigationsPage, 'list'),
+      page('investigations/new', NewInvestigationPage, 'detail'),
       page('investigations/:id', InvestigationDetailPage, 'detail'),
+      page('investigations/:id/reports/:version', ReportPage, 'detail'),
       page('environments', EnvironmentsPage, 'list'),
       page('environments/:id', EnvironmentDetailPage, 'detail'),
       page('reports', ReportsPage, 'list'),

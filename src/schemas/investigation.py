@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -125,3 +125,80 @@ class TurnCancelled(BaseModel):
     investigation_id: uuid.UUID
     turn_id: uuid.UUID
     status: str = "cancelled"
+
+
+class InvestigationListItem(BaseModel):
+    """One row of the investigation history: enough to list and open it, nothing more."""
+
+    id: uuid.UUID
+    title: str
+    status: InvestigationStatus
+    severity: Severity | None
+    trigger_type: TriggerType
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    environments: list[EnvironmentSummary]
+    turn_count: int
+    latest_report_version: int | None
+
+
+class InvestigationPage(BaseModel):
+    items: list[InvestigationListItem]
+    # Offset of the next page, or None when this is the last one.
+    next_offset: int | None
+
+
+class CitedEvidenceLink(BaseModel):
+    ref: str
+    stance: str
+    title: str
+
+
+# Citation details are what a user needs to inspect a reference in an answer: the
+# recorded summary and where/when it was observed. Raw tool output (data_json) never
+# leaves the backend; only its time window is extracted.
+class EvidenceCitation(BaseModel):
+    kind: Literal["evidence"] = "evidence"
+    ref: str
+    evidence_type: str
+    title: str
+    summary: str
+    source_provider: str
+    tool_name: str | None
+    entity_type: str | None
+    entity_identifier: str | None
+    observed_at: datetime | None
+    collected_at: datetime
+    window_start: datetime | None
+    window_end: datetime | None
+    redaction_applied: bool
+    environment: EnvironmentSummary
+
+
+class FindingCitation(BaseModel):
+    kind: Literal["finding"] = "finding"
+    ref: str
+    title: str
+    summary: str
+    status: str
+    confidence: float | None
+    created_at: datetime
+    evidence: list[CitedEvidenceLink]
+    environment: EnvironmentSummary
+
+
+class HypothesisCitation(BaseModel):
+    kind: Literal["hypothesis"] = "hypothesis"
+    ref: str
+    statement: str
+    status: str
+    confidence: float | None
+    created_at: datetime
+    environment: EnvironmentSummary
+
+
+Citation = Annotated[
+    EvidenceCitation | FindingCitation | HypothesisCitation, Field(discriminator="kind")
+]

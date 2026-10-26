@@ -1,3 +1,4 @@
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,3 +22,7 @@ async def create_environment(session: AsyncSession, data: EnvironmentCreate) -> 
             raise EnvironmentNameTaken(data.name) from exc
         raise
     return environment
+
+
+async def list_environments(session: AsyncSession, *, limit: int) -> list[Environment]:
+    return list(await session.scalars(select(Environment).order_by(Environment.name).limit(limit)))

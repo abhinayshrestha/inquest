@@ -1,6 +1,8 @@
 import '@testing-library/jest-dom/vitest'
 import { cleanup } from '@testing-library/react'
-import { afterEach } from 'vitest'
+import { afterEach, beforeEach, vi } from 'vitest'
+
+import { MockEventSource } from './event-source'
 
 // jsdom lacks these; Radix primitives and the theme provider use them.
 if (!window.matchMedia) {
@@ -17,6 +19,13 @@ if (!window.matchMedia) {
     }) as MediaQueryList
 }
 
+// jsdom implements window.scrollTo as a logged 'not implemented' error.
+window.scrollTo = () => {}
+
+if (!Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = () => {}
+}
+
 if (!window.ResizeObserver) {
   window.ResizeObserver = class {
     observe() {}
@@ -24,6 +33,11 @@ if (!window.ResizeObserver) {
     disconnect() {}
   }
 }
+
+beforeEach(() => {
+  MockEventSource.reset()
+  vi.stubGlobal('EventSource', MockEventSource)
+})
 
 afterEach(() => {
   cleanup()

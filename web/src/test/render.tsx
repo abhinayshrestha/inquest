@@ -6,29 +6,45 @@ import { vi } from 'vitest'
 import { AppProviders } from '@/app/providers'
 import { routes } from '@/app/routes'
 
-export function renderRoute(path: string) {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-  })
+export function renderRoute(path: string, { queryClient }: { queryClient?: QueryClient } = {}) {
+  const client =
+    queryClient ??
+    new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    })
   const router = createMemoryRouter(routes, { initialEntries: [path] })
   const result = render(
-    <AppProviders queryClient={queryClient}>
+    <AppProviders queryClient={client}>
       <RouterProvider router={router} />
     </AppProviders>,
   )
-  return { ...result, router, queryClient }
+  return { ...result, router, queryClient: client }
 }
 
-type Reply = { status?: number; body?: unknown }
+export type Reply = { status?: number; body?: unknown }
+type Handler = Reply | Reply[] | ((request: { url: URL; body: unknown }) => Reply)
 
-// Routes requests by "METHOD /path" (without the /api prefix); unknown requests fail the
-// test loudly instead of hanging.
-export function mockFetch(replies: Record<string, Reply>) {
+// Routes requests by "METHOD /path?query" or "METHOD /path" (without the /api prefix).
+// An array is a sequence: each call takes the next reply and the last one repeats.
+// Unknown requests fail loudly instead of hanging.
+export function mockFetch(replies: Record<string, Handler>) {
+  const calls = new Map<string, number>()
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input), 'http://localhost')
-    const key = `${init?.method ?? 'GET'} ${url.pathname.replace(/^\/api/, '')}`
-    const reply = replies[key]
-    if (!reply) throw new Error(`Unexpected request: ${key}`)
+    const path = url.pathname.replace(/^\/api/, '')
+    const method = init?.method ?? 'GET'
+    const key = [`${method} ${path}${url.search}`, `${method} ${path}`].find((k) => k in replies)
+    if (!key) throw new Error(`Unexpected request: ${method} ${path}${url.search}`)
+    const handler = replies[key]!
+    const n = calls.get(key) ?? 0
+    calls.set(key, n + 1)
+    const body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined
+    const reply =
+      typeof handler === 'function'
+        ? handler({ url, body })
+        : Array.isArray(handler)
+          ? handler[Math.min(n, handler.length - 1)]!
+          : handler
     return new Response(reply.body === undefined ? null : JSON.stringify(reply.body), {
       status: reply.status ?? 200,
       headers: { 'Content-Type': 'application/json' },
@@ -36,4 +52,11 @@ export function mockFetch(replies: Record<string, Reply>) {
   })
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
+}
+
+export function requestsTo(fetchMock: ReturnType<typeof mockFetch>, method: string, path: string) {
+  return fetchMock.mock.calls.filter(([input, init]) => {
+    const url = new URL(String(input), 'http://localhost')
+    return (init?.method ?? 'GET') === method && url.pathname === `/api${path}`
+  })
 }

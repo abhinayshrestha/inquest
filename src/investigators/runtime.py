@@ -56,7 +56,10 @@ _current: Runtime | None = None
 
 def current() -> Runtime:
     if _current is None:
-        raise RunnerDisabled("investigation runner is disabled (INQUEST_RUNNER_ENABLED=true)")
+        raise RunnerDisabled(
+            "investigation runner is disabled; restart the backend with "
+            "INQUEST_RUNNER_ENABLED=true to run investigations"
+        )
     return _current
 
 

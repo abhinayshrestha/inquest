@@ -30,6 +30,9 @@ if TYPE_CHECKING:
 
 MAX_QUESTION_CHARS = 10_000
 MAX_ANSWER_JSON_BYTES = 65_536
+# Response blocks (D023) are derived from the answer and evidence; charts are bounded
+# projections, so this leaves room without letting telemetry be copied in.
+MAX_PRESENTATION_JSON_BYTES = 131_072
 
 
 class TurnKind(StrEnum):
@@ -84,6 +87,13 @@ class InvestigationTurn(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             f"octet_length(answer_json::text) <= {MAX_ANSWER_JSON_BYTES}", name="answer_json_size"
         ),
         CheckConstraint(COMPLETED_AFTER_STARTED, name="completed_after_started"),
+        CheckConstraint(
+            "presentation_json IS NULL OR status = 'completed'", name="presentation_when_done"
+        ),
+        CheckConstraint(
+            f"octet_length(presentation_json::text) <= {MAX_PRESENTATION_JSON_BYTES}",
+            name="presentation_json_size",
+        ),
     )
 
     # RESTRICT: the conversation is investigation history (D006).
@@ -100,6 +110,10 @@ class InvestigationTurn(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     decision: Mapped[TurnDecision | None] = mapped_column(str_enum(TurnDecision))
     answer_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    # Response blocks built deterministically from the validated answer and its evidence
+    # (services.presentation), stored so reopening an answer never recomputes or calls a
+    # model. Derived data: rebuilt when missing, invalid or from an older version.
+    presentation_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     error_code: Mapped[str | None] = mapped_column(String(100))
     # Set when the API accepted the turn for execution. Recovery starts pending turns
     # that have it (accepted, never started) and never ones that lack it (created only).

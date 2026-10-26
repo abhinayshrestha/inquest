@@ -130,6 +130,74 @@ export const progressEvent = z.object({
   payload: json,
 })
 
+export const investigationListItem = z.object({
+  id,
+  title: z.string(),
+  status: investigationStatus,
+  severity: severity.nullable(),
+  trigger_type: triggerType,
+  created_at: timestamp,
+  updated_at: timestamp,
+  started_at: timestamp.nullable(),
+  completed_at: timestamp.nullable(),
+  environments: z.array(environmentSummary),
+  turn_count: z.int(),
+  latest_report_version: z.int().nullable(),
+})
+
+export const investigationPage = z.object({
+  items: z.array(investigationListItem),
+  next_offset: z.int().nullable(),
+})
+
+export const environmentList = z.array(environmentSummary)
+
+// GET /investigations/{id}/citations/{ref}: recorded summaries and metadata only.
+const citationBase = { ref: z.string(), environment: environmentSummary }
+
+export const evidenceCitation = z.object({
+  ...citationBase,
+  kind: z.literal('evidence'),
+  evidence_type: z.string(),
+  title: z.string(),
+  summary: z.string(),
+  source_provider: z.string(),
+  tool_name: z.string().nullable(),
+  entity_type: z.string().nullable(),
+  entity_identifier: z.string().nullable(),
+  observed_at: timestamp.nullable(),
+  collected_at: timestamp,
+  window_start: timestamp.nullable(),
+  window_end: timestamp.nullable(),
+  redaction_applied: z.boolean(),
+})
+
+export const findingCitation = z.object({
+  ...citationBase,
+  kind: z.literal('finding'),
+  title: z.string(),
+  summary: z.string(),
+  status: z.string(),
+  confidence: z.number().nullable(),
+  created_at: timestamp,
+  evidence: z.array(z.object({ ref: z.string(), stance: z.string(), title: z.string() })),
+})
+
+export const hypothesisCitation = z.object({
+  ...citationBase,
+  kind: z.literal('hypothesis'),
+  statement: z.string(),
+  status: z.string(),
+  confidence: z.number().nullable(),
+  created_at: timestamp,
+})
+
+export const citation = z.discriminatedUnion('kind', [
+  evidenceCitation,
+  findingCitation,
+  hypothesisCitation,
+])
+
 // Request bodies (src/schemas/*.py).
 export const environmentCreate = z.object({
   name: z.string().min(1).max(255),
@@ -167,3 +235,9 @@ export type ProgressEvent = z.infer<typeof progressEvent>
 export type EnvironmentCreate = z.infer<typeof environmentCreate>
 export type InvestigationCreate = z.infer<typeof investigationCreate>
 export type FollowUpCreate = z.infer<typeof followUpCreate>
+export type InvestigationListItem = z.infer<typeof investigationListItem>
+export type InvestigationPage = z.infer<typeof investigationPage>
+export type EvidenceCitation = z.infer<typeof evidenceCitation>
+export type FindingCitation = z.infer<typeof findingCitation>
+export type HypothesisCitation = z.infer<typeof hypothesisCitation>
+export type Citation = z.infer<typeof citation>
