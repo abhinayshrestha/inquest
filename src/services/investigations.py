@@ -1,7 +1,7 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import set_committed_value
@@ -12,6 +12,7 @@ from src.models import (
     Investigation,
     InvestigationAssignment,
     InvestigationEnvironment,
+    InvestigationReport,
     InvestigationStatus,
     InvestigationTurn,
     TriggerType,
@@ -146,6 +147,54 @@ async def get_investigation(
             selectinload(Investigation.reports),
         )
     )
+
+
+async def list_investigations(
+    session: AsyncSession, *, limit: int, offset: int
+) -> tuple[list[Investigation], dict[uuid.UUID, int], dict[uuid.UUID, int], bool]:
+    """Newest first. Returns the page, turn counts, latest report versions and whether
+    more rows follow. Counts come from two grouped queries over the page's ids, so the
+    cost is bounded by the page size, not by history length."""
+    rows = list(
+        await session.scalars(
+            select(Investigation)
+            .options(
+                selectinload(Investigation.environments).selectinload(
+                    InvestigationEnvironment.environment
+                )
+            )
+            .order_by(Investigation.created_at.desc(), Investigation.id.desc())
+            .limit(limit + 1)
+            .offset(offset)
+        )
+    )
+    has_more = len(rows) > limit
+    page = rows[:limit]
+    ids = [i.id for i in page]
+    turn_counts: dict[uuid.UUID, int] = {}
+    latest_reports: dict[uuid.UUID, int] = {}
+    if ids:
+        turn_counts = dict(
+            (
+                await session.execute(
+                    select(InvestigationTurn.investigation_id, func.count())
+                    .where(InvestigationTurn.investigation_id.in_(ids))
+                    .group_by(InvestigationTurn.investigation_id)
+                )
+            ).all()
+        )
+        latest_reports = dict(
+            (
+                await session.execute(
+                    select(
+                        InvestigationReport.investigation_id, func.max(InvestigationReport.version)
+                    )
+                    .where(InvestigationReport.investigation_id.in_(ids))
+                    .group_by(InvestigationReport.investigation_id)
+                )
+            ).all()
+        )
+    return page, turn_counts, latest_reports, has_more
 
 
 async def start_investigation(session: AsyncSession, investigation_id: uuid.UUID) -> Investigation:

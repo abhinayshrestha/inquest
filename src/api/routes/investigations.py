@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request, status
+from fastapi import APIRouter, Header, HTTPException, Path, Query, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
@@ -9,15 +9,20 @@ from src.api.sse import cursor_from, event_stream
 from src.investigators import runtime
 from src.investigators.runner import RunnerBusy
 from src.models import Investigation, InvestigationReport, InvestigationTurn
+from src.schemas.environment import EnvironmentSummary
 from src.schemas.investigation import (
+    Citation,
     FollowUpCreate,
     InvestigationCreate,
+    InvestigationListItem,
+    InvestigationPage,
     InvestigationRead,
     ReportRead,
     TurnAccepted,
     TurnCancelled,
 )
-from src.services import investigations, turns
+from src.schemas.presentation import Presentation
+from src.services import citations, investigations, presentation, turns
 
 router = APIRouter(prefix="/investigations", tags=["investigations"])
 
@@ -56,6 +61,41 @@ async def create_investigation(data: InvestigationCreate, session: SessionDep) -
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="environment not found"
         ) from exc
+
+
+@router.get("", response_model=InvestigationPage)
+async def list_investigations(
+    session: SessionDep,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=10_000),
+) -> InvestigationPage:
+    """Investigation history, newest first, one bounded page at a time."""
+    page, turn_counts, latest_reports, has_more = await investigations.list_investigations(
+        session, limit=limit, offset=offset
+    )
+    return InvestigationPage(
+        items=[
+            InvestigationListItem(
+                id=i.id,
+                title=i.title,
+                status=i.status,
+                severity=i.severity,
+                trigger_type=i.trigger_type,
+                created_at=i.created_at,
+                updated_at=i.updated_at,
+                started_at=i.started_at,
+                completed_at=i.completed_at,
+                environments=sorted(
+                    (EnvironmentSummary.model_validate(e.environment) for e in i.environments),
+                    key=lambda e: e.name,
+                ),
+                turn_count=turn_counts.get(i.id, 0),
+                latest_report_version=latest_reports.get(i.id),
+            )
+            for i in page
+        ],
+        next_offset=offset + limit if has_more else None,
+    )
 
 
 @router.get("/{investigation_id}", response_model=InvestigationRead)
@@ -136,6 +176,39 @@ async def get_report(
     if report is None:
         raise _not_found("report version")
     return report
+
+
+@router.get("/{investigation_id}/citations/{ref}", response_model=Citation)
+async def get_citation(
+    investigation_id: uuid.UUID,
+    session: SessionDep,
+    ref: str = Path(pattern=citations.REF_PATTERN, description="ev_/fd_/hy_ + 8 hex digits"),
+):
+    """The evidence, finding or hypothesis a ref in this investigation's answers points
+    to: recorded summary and metadata only, never raw tool output."""
+    if await session.get(Investigation, investigation_id) is None:
+        raise _not_found()
+    citation = await citations.resolve_citation(session, investigation_id, ref)
+    if citation is None:
+        raise _not_found("citation")
+    return citation
+
+
+@router.get("/{investigation_id}/turns/{turn_id}/presentation", response_model=Presentation)
+async def get_presentation(
+    investigation_id: uuid.UUID, turn_id: uuid.UUID, session: SessionDep
+) -> Presentation:
+    """Response blocks for a completed turn's answer (D023): built deterministically from
+    the validated answer and the evidence it cites, stored with the turn on first
+    request, and served from storage afterwards. Never calls a model."""
+    try:
+        return await presentation.turn_presentation(session, investigation_id, turn_id)
+    except presentation.TurnNotFound as exc:
+        raise _not_found("turn") from exc
+    except presentation.NotPresentable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="turn has no validated answer"
+        ) from exc
 
 
 @router.get("/{investigation_id}/events")
