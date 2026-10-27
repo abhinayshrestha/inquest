@@ -50,7 +50,12 @@ from src.investigators.validation import (
     validate_plan,
 )
 from src.mcp_server import McpSettings
-from src.models import AssignmentStatus, InvestigationAssignment, InvestigationStatus
+from src.models import (
+    AssignmentStatus,
+    InvestigationAssignment,
+    InvestigationStatus,
+    can_use_process_credentials,
+)
 from src.models.evidence import MAX_SUMMARY_CHARS
 from src.services.investigations import finish_assignment
 from src.services.progress import append_progress_event
@@ -722,14 +727,27 @@ async def run_local_investigator(
     snapshot = await graph.aget_state(config)
     resumed = bool(snapshot.values)
     async with SessionLocal() as s:
-        assignment = await s.get(InvestigationAssignment, assignment_id)
-    if assignment is None:
+        loaded = await records.load_assignment(s, assignment_id)
+    if loaded is None:
         raise AssignmentNotRunning(f"assignment {assignment_id} does not exist")
+    assignment, investigation, environment = loaded
 
     values: dict[str, Any] = dict(snapshot.values)
     if not (resumed and not snapshot.next):
         if assignment.status != AssignmentStatus.RUNNING:
             raise AssignmentNotRunning(f"assignment {assignment_id} is {assignment.status}")
+        # Checked before any model call or MCP token: the token's tenant comes from these
+        # rows, and process-wide credentials serve only environments allowed them (D033).
+        refusal = (
+            "scope_mismatch"
+            if investigation.organization_id != environment.organization_id
+            else None
+            if can_use_process_credentials(environment)
+            else "configuration_required"
+        )
+        if refusal is not None:
+            await _finish(assignment_id, AssignmentStatus.FAILED)
+            raise AssignmentNotRunning(f"assignment {assignment_id} refused: {refusal}")
         model = model or local_model()
         mcp_settings = mcp_settings or McpSettings()
         started = assignment.started_at or datetime.now(UTC)
@@ -743,6 +761,7 @@ async def run_local_investigator(
                 deadline,
                 connect(
                     assignment,
+                    organization_id=investigation.organization_id,
                     url=mcp_settings.url,
                     settings=mcp_settings,
                     transport=mcp_transport,

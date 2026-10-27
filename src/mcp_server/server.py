@@ -49,7 +49,7 @@ CANONICAL_TO_MCP = {v: k for k, v in MCP_TO_CANONICAL.items()}
 IDEMPOTENCY_META_KEY = "inquest/tool_call_id"
 IDEMPOTENCY_HEADER = "inquest-tool-call-id"
 
-BINDING_KEYS = ("investigation_id", "assignment_id", "environment_id")
+BINDING_KEYS = ("investigation_id", "assignment_id", "environment_id", "organization_id")
 MAX_TOOL_NAME_CHARS = 150
 READ_ONLY = types.ToolAnnotations(
     read_only_hint=True, destructive_hint=False, open_world_hint=False

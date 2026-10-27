@@ -2,9 +2,10 @@
 
 The orchestrator mints one token per running assignment and hands it to that assignment's
 investigator runtime (never to the model, never into graph state). The token is the only
-source of investigation, assignment and environment IDs for MCP tool calls. Revocation is
-the assignment leaving `running`: the executor re-checks that under a row lock on every
-call, so an unexpired token for a closed assignment can run nothing.
+source of organization, investigation, assignment and environment IDs for MCP tool
+calls. Revocation is the assignment leaving `running`: the executor re-checks that, and
+the token's organization against the assignment's rows, under a row lock on every call,
+so an unexpired token for a closed or foreign assignment can run nothing.
 """
 
 import logging
@@ -27,7 +28,9 @@ AUDIENCE = "inquest-mcp"
 INVESTIGATE_SCOPE = "inquest:investigate"
 ALGORITHM = "HS256"
 MIN_SECRET_CHARS = 32
-REQUIRED_CLAIMS = ["iss", "aud", "sub", "exp", "iat", "jti", "scope", "inv", "env"]
+REQUIRED_CLAIMS = ["iss", "aud", "sub", "exp", "iat", "jti", "scope", "inv", "env", "org"]
+# The "org" claim of an ownerless legacy assignment (D032): host-side tooling only.
+NO_ORGANIZATION = "legacy"
 
 
 class McpSettings(BaseSettings):
@@ -59,9 +62,15 @@ def _secret(settings: McpSettings) -> str:
 
 
 def mint_assignment_token(
-    assignment: InvestigationAssignment, settings: McpSettings, *, ttl_seconds: int | None = None
+    assignment: InvestigationAssignment,
+    settings: McpSettings,
+    *,
+    organization_id: uuid.UUID | None,
+    ttl_seconds: int | None = None,
 ) -> str:
-    """For the orchestrator, when it launches an investigator. Not reachable over HTTP."""
+    """For the orchestrator, when it launches an investigator. Not reachable over HTTP.
+    `organization_id` must come from the assignment's investigation and environment rows;
+    the executor compares it with them again on every call."""
     now = int(time.time())
     claims = {
         "iss": ISSUER,
@@ -69,6 +78,7 @@ def mint_assignment_token(
         "sub": str(assignment.id),
         "inv": str(assignment.investigation_id),
         "env": str(assignment.environment_id),
+        "org": str(organization_id) if organization_id else NO_ORGANIZATION,
         "scope": INVESTIGATE_SCOPE,
         "iat": now,
         "exp": now + (ttl_seconds or settings.token_ttl_seconds),
@@ -92,6 +102,9 @@ def _decode(token: str, secret: str) -> dict[str, Any] | None:
             "investigation_id": uuid.UUID(claims["inv"]),
             "assignment_id": uuid.UUID(claims["sub"]),
             "environment_id": uuid.UUID(claims["env"]),
+            "organization_id": (
+                None if claims["org"] == NO_ORGANIZATION else uuid.UUID(claims["org"])
+            ),
         }
     except (jwt.PyJWTError, ValueError, TypeError, AttributeError):
         return None
@@ -122,5 +135,8 @@ class AssignmentTokenVerifier:
             scopes=[scope] if isinstance(scope, str) else [],
             expires_at=int(claims["exp"]),
             subject=str(claims["assignment_id"]),
-            claims={k: claims[k] for k in ("investigation_id", "assignment_id", "environment_id")},
+            claims={
+                k: claims[k]
+                for k in ("investigation_id", "assignment_id", "environment_id", "organization_id")
+            },
         )

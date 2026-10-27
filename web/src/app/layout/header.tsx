@@ -6,6 +6,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { MobileNav } from './mobile-nav'
 import { OrganizationSwitcher } from './organization-switcher'
 import { ThemeMenu } from './theme-menu'
+import { UserMenu } from './user-menu'
 
 export function Header() {
   return (
@@ -17,14 +18,16 @@ export function Header() {
           <TooltipTrigger asChild>
             <Badge variant="outline" tabIndex={0} className="hidden gap-1 sm:inline-flex">
               <ShieldAlert aria-hidden className="text-warning" />
-              Local development
+              Private preview
             </Badge>
           </TooltipTrigger>
-          <TooltipContent className="max-w-64">
-            No authentication or tenant isolation yet. Run Inquest locally only.
+          <TooltipContent className="max-w-72">
+            Data is isolated per organization, but environments cannot hold their own credentials
+            yet, so most cannot run investigations. Not for public deployment.
           </TooltipContent>
         </Tooltip>
         <ThemeMenu />
+        <UserMenu />
       </div>
     </header>
   )

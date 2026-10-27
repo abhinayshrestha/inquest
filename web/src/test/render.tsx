@@ -5,6 +5,7 @@ import { vi } from 'vitest'
 
 import { AppProviders } from '@/app/providers'
 import { routes } from '@/app/routes'
+import { MEMBERSHIP, SIGNED_IN, TEST_ORGANIZATION, TEST_USER } from '@/test/session'
 
 export function renderRoute(path: string, { queryClient }: { queryClient?: QueryClient } = {}) {
   const client =
@@ -26,14 +27,26 @@ type Handler = Reply | Reply[] | ((request: { url: URL; body: unknown }) => Repl
 
 // Routes requests by "METHOD /path?query" or "METHOD /path" (without the /api prefix).
 // An array is a sequence: each call takes the next reply and the last one repeats.
-// Unknown requests fail loudly instead of hanging.
-export function mockFetch(replies: Record<string, Handler>) {
+// Unknown requests fail loudly instead of hanging. By default the browser is signed in as
+// TEST_USER, a member of TEST_ORGANIZATION (selected), unless a test replies to
+// GET /auth/session or GET /me itself.
+export function mockFetch(handlers: Record<string, Handler>) {
+  const replies: Record<string, Handler> = {
+    'GET /auth/session': { body: SIGNED_IN },
+    'GET /me': { body: { user: TEST_USER, memberships: [MEMBERSHIP] } },
+    ...handlers,
+  }
   const calls = new Map<string, number>()
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input), 'http://localhost')
     const path = url.pathname.replace(/^\/api/, '')
     const method = init?.method ?? 'GET'
-    const key = [`${method} ${path}${url.search}`, `${method} ${path}`].find((k) => k in replies)
+    // Keys are written without the selected test organization; any other organization id
+    // stays in the query and matches nothing unless a test names it.
+    const query = new URLSearchParams(url.search)
+    if (query.get('organization_id') === TEST_ORGANIZATION) query.delete('organization_id')
+    const search = query.size ? `?${query}` : ''
+    const key = [`${method} ${path}${search}`, `${method} ${path}`].find((k) => k in replies)
     if (!key) throw new Error(`Unexpected request: ${method} ${path}${url.search}`)
     const handler = replies[key]!
     const n = calls.get(key) ?? 0

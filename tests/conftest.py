@@ -6,18 +6,30 @@ os.environ["APP_ENV"] = "test"
 from collections.abc import AsyncIterator  # noqa: E402
 
 import pytest  # noqa: E402
-from httpx import ASGITransport, AsyncClient  # noqa: E402
+from httpx import AsyncClient  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
+from src.auth.settings import load_auth_settings  # noqa: E402
 from src.db.session import engine, get_session  # noqa: E402
 from src.main import app  # noqa: E402
+from tests.tenancy import Member, api_client, configure_auth, make_member  # noqa: E402
 
 
 @pytest.fixture
-async def client(session: AsyncSession) -> AsyncIterator[AsyncClient]:
+async def tenant(session: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Member]:
+    """A signed-in owner of their own organization; `client` browses as them."""
+    configure_auth(monkeypatch)
+    yield await make_member(session, name="tenant")
+    load_auth_settings.cache_clear()
+
+
+@pytest.fixture
+async def client(session: AsyncSession, tenant: Member) -> AsyncIterator[AsyncClient]:
     # Route requests through the rolled-back test session so API tests leave no rows behind.
     app.dependency_overrides[get_session] = lambda: session
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+    async with api_client(tenant) as c:
+        # Collection endpoints read one organization; detail routes ignore the parameter.
+        c.params = {"organization_id": str(tenant.organization_id)}
         yield c
     app.dependency_overrides.clear()
 

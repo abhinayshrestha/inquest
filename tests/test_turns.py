@@ -429,9 +429,16 @@ async def test_event_type_format_is_checked(session: AsyncSession):
 # --- API compatibility ---------------------------------------------------------------------
 
 
-async def test_api_create_keeps_its_shape_and_adds_turns(client: AsyncClient, session):
+async def test_api_create_keeps_its_shape_and_adds_turns(client: AsyncClient, session, tenant):
     environment = (
-        await client.post("/environments", json={"name": "ubuntu-vm", "type": "local"})
+        await client.post(
+            "/environments",
+            json={
+                "organization_id": str(tenant.organization_id),
+                "name": "ubuntu-vm",
+                "type": "local",
+            },
+        )
     ).json()
     created = await client.post(
         "/investigations",

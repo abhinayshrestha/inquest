@@ -6,6 +6,7 @@ the framework tool_call_id as the idempotency key, so a replayed graph step retu
 stored result instead of querying SigNoz again.
 """
 
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -34,13 +35,19 @@ class McpCallError(Exception):
 async def connect(
     assignment: InvestigationAssignment,
     *,
+    organization_id: uuid.UUID | None,
     url: str,
     settings: McpSettings,
     transport: httpx2.AsyncBaseTransport | None = None,
 ) -> AsyncIterator[Client]:
-    """`transport` lets tests drive the in-process app; production uses real HTTP."""
+    """`organization_id` is the assignment's tenant, read by the caller from the
+    assignment's own investigation and environment rows. `transport` lets tests drive
+    the in-process app; production uses real HTTP."""
     token = mint_assignment_token(
-        assignment, settings, ttl_seconds=int(policy.WALL_CLOCK_SECONDS) + TOKEN_SLACK_SECONDS
+        assignment,
+        settings,
+        organization_id=organization_id,
+        ttl_seconds=int(policy.WALL_CLOCK_SECONDS) + TOKEN_SLACK_SECONDS,
     )
     http = httpx2.AsyncClient(
         headers={"Authorization": f"Bearer {token}"},

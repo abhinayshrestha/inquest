@@ -9,10 +9,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.models import Environment, EnvironmentType, Investigation, InvestigationAssignment
 from src.schemas.investigation import InvestigationCreate
 from src.services import investigations
+from tests.tenancy import Member
 
 
-async def _create_environment(client: AsyncClient, name: str = "ubuntu-vm") -> dict:
-    response = await client.post("/environments", json={"name": name, "type": "local"})
+async def _create_environment(client: AsyncClient, tenant: Member, name: str = "ubuntu-vm") -> dict:
+    response = await client.post(
+        "/environments",
+        json={"organization_id": str(tenant.organization_id), "name": name, "type": "local"},
+    )
     assert response.status_code == 201
     return response.json()
 
@@ -31,10 +35,15 @@ async def _create_investigation(client: AsyncClient, environment_id: str) -> dic
     return response.json()
 
 
-async def test_create_environment(client: AsyncClient) -> None:
+async def test_create_environment(client: AsyncClient, tenant: Member) -> None:
     response = await client.post(
         "/environments",
-        json={"name": "ubuntu-vm", "type": "local", "metadata_json": {"host": "utm"}},
+        json={
+            "organization_id": str(tenant.organization_id),
+            "name": "ubuntu-vm",
+            "type": "local",
+            "metadata_json": {"host": "utm"},
+        },
     )
 
     assert response.status_code == 201
@@ -46,16 +55,19 @@ async def test_create_environment(client: AsyncClient) -> None:
     uuid.UUID(body["id"])
 
 
-async def test_duplicate_environment_name_conflicts(client: AsyncClient) -> None:
-    await _create_environment(client)
+async def test_duplicate_environment_name_conflicts(client: AsyncClient, tenant: Member) -> None:
+    await _create_environment(client, tenant)
 
-    response = await client.post("/environments", json={"name": "ubuntu-vm", "type": "aws"})
+    response = await client.post(
+        "/environments",
+        json={"organization_id": str(tenant.organization_id), "name": "ubuntu-vm", "type": "aws"},
+    )
 
     assert response.status_code == 409
 
 
-async def test_create_investigation(client: AsyncClient) -> None:
-    environment = await _create_environment(client)
+async def test_create_investigation(client: AsyncClient, tenant: Member) -> None:
+    environment = await _create_environment(client, tenant)
 
     body = await _create_investigation(client, environment["id"])
 
@@ -68,8 +80,8 @@ async def test_create_investigation(client: AsyncClient) -> None:
     assert body["final_result_json"] is None
 
 
-async def test_create_investigation_without_severity(client: AsyncClient) -> None:
-    environment = await _create_environment(client)
+async def test_create_investigation_without_severity(client: AsyncClient, tenant: Member) -> None:
+    environment = await _create_environment(client, tenant)
 
     response = await client.post(
         "/investigations",
@@ -81,9 +93,9 @@ async def test_create_investigation_without_severity(client: AsyncClient) -> Non
 
 
 async def test_investigation_creates_initial_assignment(
-    client: AsyncClient, session: AsyncSession
+    client: AsyncClient, session: AsyncSession, tenant: Member
 ) -> None:
-    environment = await _create_environment(client)
+    environment = await _create_environment(client, tenant)
 
     body = await _create_investigation(client, environment["id"])
 
@@ -102,7 +114,7 @@ async def test_investigation_creates_initial_assignment(
 
 
 async def test_create_investigation_with_unknown_environment(
-    client: AsyncClient, session: AsyncSession
+    client: AsyncClient, session: AsyncSession, tenant: Member
 ) -> None:
     response = await client.post(
         "/investigations",
@@ -113,8 +125,8 @@ async def test_create_investigation_with_unknown_environment(
     assert await session.scalar(select(func.count()).select_from(Investigation)) == 0
 
 
-async def test_get_investigation_with_assignments(client: AsyncClient) -> None:
-    environment = await _create_environment(client)
+async def test_get_investigation_with_assignments(client: AsyncClient, tenant: Member) -> None:
+    environment = await _create_environment(client, tenant)
     created = await _create_investigation(client, environment["id"])
 
     response = await client.get(f"/investigations/{created['id']}")
@@ -133,7 +145,7 @@ async def test_get_investigation_with_assignments(client: AsyncClient) -> None:
     }
 
 
-async def test_get_unknown_investigation(client: AsyncClient) -> None:
+async def test_get_unknown_investigation(client: AsyncClient, tenant: Member) -> None:
     response = await client.get(f"/investigations/{uuid.uuid4()}")
 
     assert response.status_code == 404

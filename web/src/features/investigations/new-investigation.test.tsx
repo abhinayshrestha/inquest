@@ -2,7 +2,7 @@ import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 
-import { ENV, INVESTIGATION_ID, investigationPending } from '@/test/fixtures'
+import { ENV, ENV_ITEM, INVESTIGATION_ID, investigationPending } from '@/test/fixtures'
 import { mockFetch, renderRoute, requestsTo } from '@/test/render'
 
 const PATH = `/investigations/${INVESTIGATION_ID}`
@@ -20,8 +20,13 @@ describe('new investigation', () => {
     const fetchMock = mockFetch({
       'GET /environments': {
         body: [
-          ENV,
-          { ...ENV, id: '0f0e0d0c-9999-4c4c-8d8d-0123456789ab', name: 'old', status: 'disabled' },
+          ENV_ITEM,
+          {
+            ...ENV_ITEM,
+            id: '0f0e0d0c-9999-4c4c-8d8d-0123456789ab',
+            name: 'old',
+            status: 'disabled',
+          },
         ],
       },
       'POST /investigations': { status: 201, body: investigationPending },
@@ -59,7 +64,7 @@ describe('new investigation', () => {
 
   it('opens a created investigation even if starting is refused, and says why', async () => {
     mockFetch({
-      'GET /environments': { body: [ENV] },
+      'GET /environments': { body: [ENV_ITEM] },
       'POST /investigations': { status: 201, body: investigationPending },
       [`POST ${PATH}/start`]: { status: 503, body: { detail: 'investigation runner is disabled' } },
       [`GET ${PATH}`]: { body: investigationPending },
@@ -73,7 +78,7 @@ describe('new investigation', () => {
   })
 
   it('validates required fields before calling the API', async () => {
-    const fetchMock = mockFetch({ 'GET /environments': { body: [ENV] } })
+    const fetchMock = mockFetch({ 'GET /environments': { body: [ENV_ITEM] } })
     renderRoute('/investigations/new')
     await userEvent.click(await screen.findByRole('button', { name: 'Create and start' }))
     expect(screen.getByRole('alert')).toHaveTextContent(/enter a title and a question/)

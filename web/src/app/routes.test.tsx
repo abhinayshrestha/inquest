@@ -2,7 +2,7 @@ import { screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 
-import { ENV, INVESTIGATION_ID, listItem } from '@/test/fixtures'
+import { ENV_ITEM, listItem, overviewCounts, reportListItem } from '@/test/fixtures'
 import { mockFetch, renderRoute, requestsTo } from '@/test/render'
 
 const page = (items: unknown[], next: number | null = null) => ({
@@ -12,8 +12,10 @@ const page = (items: unknown[], next: number | null = null) => ({
 function backend(overrides: Record<string, unknown> = {}) {
   return mockFetch({
     'GET /health': { body: { status: 'ok', database: 'ok' } },
+    'GET /overview': { body: overviewCounts },
+    'GET /reports': { body: { items: [reportListItem], next_offset: null } },
     'GET /investigations': page([listItem]),
-    'GET /environments': { body: [ENV] },
+    'GET /environments': { body: [ENV_ITEM] },
     ...overrides,
   })
 }
@@ -23,7 +25,6 @@ describe('routing', () => {
     ['/investigations', 'Investigations'],
     ['/investigations/new', 'New investigation'],
     ['/environments', 'Environments'],
-    ['/environments/abc', 'Environment'],
     ['/reports', 'Reports'],
     ['/organizations', 'Organizations'],
     ['/settings', 'Settings'],
@@ -35,17 +36,26 @@ describe('routing', () => {
     expect(screen.getByRole('button', { name: /switch organization/i })).toBeInTheDocument()
   })
 
-  it('renders the overview with health, recent investigations and environments', async () => {
+  it('renders the overview with stored counts and navigation', async () => {
     backend()
     renderRoute('/')
     expect(await screen.findByRole('heading', { level: 1, name: 'Overview' })).toBeInTheDocument()
     expect(await screen.findByText(/API ok · database ok/)).toBeInTheDocument()
-    const recent = await screen.findByRole('list', { name: 'Recent investigations' })
-    expect(within(recent).getByRole('link', { name: /API latency on \/slow/ })).toHaveAttribute(
+    expect(await screen.findByRole('link', { name: /Investigations 11/ })).toHaveAttribute(
       'href',
-      `/investigations/${INVESTIGATION_ID}`,
+      '/investigations',
     )
-    expect(await screen.findByText('ubuntu-vm')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /Report versions 5/ })).toHaveAttribute(
+      'href',
+      '/reports',
+    )
+  })
+
+  it('shows not found for an environment id that cannot exist', async () => {
+    const fetchMock = backend()
+    renderRoute('/environments/abc')
+    expect(await screen.findByText('Environment not found')).toBeInTheDocument()
+    expect(requestsTo(fetchMock, 'GET', '/environments/abc')).toHaveLength(0)
   })
 
   it('lists environments without configuration', async () => {
@@ -53,7 +63,7 @@ describe('routing', () => {
     renderRoute('/environments')
     const list = await screen.findByRole('list', { name: 'Environments' })
     expect(within(list).getByText('ubuntu-vm')).toBeInTheDocument()
-    expect(within(list).getByText('Local')).toBeInTheDocument()
+    expect(within(list).getByText(/Local · 3 investigations/)).toBeInTheDocument()
   })
 
   it('pages through the investigation history', async () => {
@@ -83,27 +93,6 @@ describe('routing', () => {
     renderRoute('/investigations')
     expect(await screen.findByText('No investigations yet')).toBeInTheDocument()
     expect(screen.getAllByRole('link', { name: /new investigation/i }).length).toBeGreaterThan(0)
-  })
-
-  it('lists the latest report per investigation', async () => {
-    backend({
-      'GET /investigations': page([
-        listItem,
-        {
-          ...listItem,
-          id: '00000000-0000-4000-8000-000000000002',
-          title: 'No report',
-          latest_report_version: null,
-        },
-      ]),
-    })
-    renderRoute('/reports')
-    const list = await screen.findByRole('list', { name: 'Reports' })
-    expect(within(list).getAllByRole('link')).toHaveLength(1)
-    expect(within(list).getByRole('link')).toHaveAttribute(
-      'href',
-      `/investigations/${INVESTIGATION_ID}/reports/1`,
-    )
   })
 
   it('renders a not-found page for unknown routes', async () => {

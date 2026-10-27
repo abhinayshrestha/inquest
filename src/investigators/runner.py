@@ -8,6 +8,9 @@
   workflow to continue. It is failed explicitly (legacy_no_checkpoint) and the
   investigation returns to idle; its evidence and findings stay.
 - Wall clock: TURN_WALL_CLOCK_SECONDS from turn.started_at, across restarts.
+- Credentials (D033): a turn whose environments may not use the backend's process-wide
+  credentials never reaches a model or MCP; it ends with configuration_required. This also
+  covers turns found by crash recovery.
 """
 
 import asyncio
@@ -30,7 +33,7 @@ from src.investigators.llm import local_model, main_model
 from src.investigators.main_graph import MainContext, build_graph
 from src.mcp_server import McpSettings
 from src.models import InvestigationReport, InvestigationTurn, TurnStatus
-from src.services import turns
+from src.services import access, turns
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +159,11 @@ async def run_turn(
         snapshot = await graph.aget_state(config)
         if turn.status in FINISHED:
             return await _result(turn_id, dict(snapshot.values), resumed=False, reconciled=False)
+        async with SessionLocal() as s:
+            runnable = await access.investigation_runnable(s, turn.investigation_id)
+        if not runnable:
+            await _fail(turn_id, "configuration_required")
+            return await _result(turn_id, {}, resumed=False, reconciled=False)
         resumable = bool(snapshot.values) and bool(snapshot.next)
         if turn.status == TurnStatus.RUNNING and not resumable:
             async with SessionLocal() as s:

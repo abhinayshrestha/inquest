@@ -26,6 +26,7 @@ from src.models import (
     TriggerType,
 )
 from tests.records import add_assignment
+from tests.tenancy import Member
 
 # Far in the future so these rows sort before anything else in the shared test database
 # (rows created in one transaction share now()).
@@ -36,7 +37,11 @@ async def _investigation(
     session: AsyncSession, title: str, created_at: datetime, environment: Environment
 ) -> InvestigationAssignment:
     investigation = Investigation(
-        title=title, question=f"{title}?", trigger_type=TriggerType.MANUAL, created_at=created_at
+        title=title,
+        question=f"{title}?",
+        trigger_type=TriggerType.MANUAL,
+        created_at=created_at,
+        organization_id=environment.organization_id,
     )
     assignment = await add_assignment(session, investigation=investigation, environment=environment)
     await session.flush()
@@ -44,9 +49,9 @@ async def _investigation(
 
 
 async def test_history_lists_newest_first_with_counts_and_pages(
-    client: AsyncClient, session: AsyncSession
+    client: AsyncClient, session: AsyncSession, tenant: Member
 ) -> None:
-    env = Environment(name=f"env-{uuid.uuid4().hex[:8]}", type=EnvironmentType.LOCAL)
+    env = Environment(name=f"env-{uuid.uuid4().hex[:8]}", type=EnvironmentType.LOCAL, **tenant.owns)
     older = await _investigation(session, "older", FUTURE, env)
     newer = await _investigation(session, "newer", FUTURE + timedelta(minutes=1), env)
     session.add(
@@ -74,6 +79,7 @@ async def test_history_lists_newest_first_with_counts_and_pages(
     assert set(item) == {
         "id", "title", "status", "severity", "trigger_type", "created_at", "updated_at",
         "started_at", "completed_at", "environments", "turn_count", "latest_report_version",
+        "latest_turn_status", "latest_turn_completed_at",
     }  # fmt: skip
 
     second = (await client.get("/investigations", params={"limit": 1, "offset": 1})).json()
@@ -87,22 +93,29 @@ async def test_history_page_size_is_bounded(client: AsyncClient) -> None:
     assert (await client.get("/investigations", params={"offset": -1})).status_code == 422
 
 
-async def test_environment_list_has_no_configuration(client: AsyncClient) -> None:
+async def test_environment_list_has_no_configuration(client: AsyncClient, tenant: Member) -> None:
     name = f"env-{uuid.uuid4().hex[:8]}"
     created = await client.post(
         "/environments",
-        json={"name": name, "type": "local", "metadata_json": {"signoz": {"hosts": ["vm"]}}},
+        json={
+            "organization_id": str(tenant.organization_id),
+            "name": name,
+            "type": "local",
+            "metadata_json": {"signoz": {"hosts": ["vm"]}},
+        },
     )
     assert created.status_code == 201
 
     listed = (await client.get("/environments")).json()
     mine = next(e for e in listed if e["name"] == name)
-    assert set(mine) == {"id", "name", "type", "status"}
+    assert "metadata_json" not in mine and "signoz" not in str(mine)
     assert (await client.get("/environments", params={"limit": 201})).status_code == 422
 
 
-async def _records(session: AsyncSession) -> tuple[InvestigationAssignment, Evidence, Finding]:
-    assignment = await add_assignment(session)
+async def _records(
+    session: AsyncSession, tenant: Member
+) -> tuple[InvestigationAssignment, Evidence, Finding]:
+    assignment = await add_assignment(session, tenant=tenant)
     await session.flush()
     tool_call = ToolCall(
         assignment=assignment, tool_name="signoz.trace_stats", tool_category=ToolCategory.TELEMETRY
@@ -134,9 +147,9 @@ async def _records(session: AsyncSession) -> tuple[InvestigationAssignment, Evid
 
 
 async def test_evidence_citation_is_summary_and_window_only(
-    client: AsyncClient, session: AsyncSession
+    client: AsyncClient, session: AsyncSession, tenant: Member
 ) -> None:
-    assignment, evidence, _ = await _records(session)
+    assignment, evidence, _ = await _records(session, tenant)
 
     response = await client.get(
         f"/investigations/{assignment.investigation_id}/citations/{ref('evidence', evidence.id)}"
@@ -156,8 +169,10 @@ async def test_evidence_citation_is_summary_and_window_only(
     assert "raw telemetry" not in response.text
 
 
-async def test_finding_and_hypothesis_citations(client: AsyncClient, session: AsyncSession) -> None:
-    assignment, evidence, finding = await _records(session)
+async def test_finding_and_hypothesis_citations(
+    client: AsyncClient, session: AsyncSession, tenant: Member
+) -> None:
+    assignment, evidence, finding = await _records(session, tenant)
     hypothesis = Hypothesis(assignment=assignment, statement="Handler sleeps")
     session.add(hypothesis)
     await session.flush()
@@ -175,10 +190,10 @@ async def test_finding_and_hypothesis_citations(client: AsyncClient, session: As
 
 
 async def test_citations_resolve_only_within_their_investigation(
-    client: AsyncClient, session: AsyncSession
+    client: AsyncClient, session: AsyncSession, tenant: Member
 ) -> None:
-    _, evidence, _ = await _records(session)
-    other = await add_assignment(session)
+    _, evidence, _ = await _records(session, tenant)
+    other = await add_assignment(session, tenant=tenant)
     await session.flush()
 
     response = await client.get(
@@ -188,8 +203,10 @@ async def test_citations_resolve_only_within_their_investigation(
     assert response.json()["detail"] == "citation not found"
 
 
-async def test_citation_refs_are_validated(client: AsyncClient, session: AsyncSession) -> None:
-    assignment, _, _ = await _records(session)
+async def test_citation_refs_are_validated(
+    client: AsyncClient, session: AsyncSession, tenant: Member
+) -> None:
+    assignment, _, _ = await _records(session, tenant)
     base = f"/investigations/{assignment.investigation_id}/citations"
 
     for bad in ("ev_123", "xx_12345678", "ev_1234567g", "ev_%25%25%25%25%25%25%25%25"):
@@ -200,9 +217,9 @@ async def test_citation_refs_are_validated(client: AsyncClient, session: AsyncSe
 
 
 async def test_ambiguous_ref_resolves_to_nothing(
-    client: AsyncClient, session: AsyncSession
+    client: AsyncClient, session: AsyncSession, tenant: Member
 ) -> None:
-    assignment, _, _ = await _records(session)
+    assignment, _, _ = await _records(session, tenant)
     for suffix in ("1", "2"):
         session.add(
             Evidence(

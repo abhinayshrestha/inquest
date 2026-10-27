@@ -29,6 +29,7 @@ def claims_for(world: World, **overrides: Any) -> dict[str, Any]:
         "sub": str(world.assignment_id),
         "inv": str(world.investigation_id),
         "env": str(world.environment_id),
+        "org": "legacy",
         "scope": INVESTIGATE_SCOPE,
         "iat": now,
         "exp": now + 300,
@@ -98,7 +99,9 @@ async def test_token_without_investigator_scope_is_forbidden(mcp_app, world: Wor
 async def test_without_a_configured_secret_nothing_is_accepted(world: World):
     with pytest.raises(TokenConfigError):
         mint_assignment_token(
-            InvestigationAssignment(id=world.assignment_id), McpSettings(token_secret="short")
+            InvestigationAssignment(id=world.assignment_id),
+            McpSettings(token_secret="short"),
+            organization_id=None,
         )
     _, app = build_mcp_app(McpSettings(token_secret=None, allowed_hosts=["testserver"]))
     response = await post(app, token_for(world))

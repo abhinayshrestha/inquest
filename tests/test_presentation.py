@@ -28,6 +28,7 @@ from src.models import (
 from src.schemas.presentation import Presentation
 from src.services import presentation
 from tests.records import add_assignment
+from tests.tenancy import Member
 
 WINDOW = {"start": "2026-10-21T17:16:00Z", "end": "2026-10-21T17:46:00Z"}
 
@@ -126,8 +127,8 @@ async def _answered(
     return turn
 
 
-async def _setup(session: AsyncSession) -> InvestigationAssignment:
-    assignment = await add_assignment(session)
+async def _setup(session: AsyncSession, tenant: Member | None = None) -> InvestigationAssignment:
+    assignment = await add_assignment(session, tenant=tenant)
     await session.flush()
     return assignment
 
@@ -292,13 +293,13 @@ async def test_fenced_code_becomes_a_code_block(session: AsyncSession):
 
 
 async def test_presentation_is_stored_and_reused_without_rebuilding(
-    client: AsyncClient, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    client: AsyncClient, session: AsyncSession, tenant: Member, monkeypatch: pytest.MonkeyPatch
 ):
     def no_model(*_args, **_kwargs):
         raise AssertionError("presentation must never call a model")
 
     monkeypatch.setattr("src.investigators.llm.chat_model", no_model)
-    a = await _setup(session)
+    a = await _setup(session, tenant)
     stats = await _evidence(session, a, _trace_stats(SLOW))
     turn = await _answered(session, a, "Which endpoint is slowest?", "GET /slow.", [stats])
     url = f"/investigations/{a.investigation_id}/turns/{turn.id}/presentation"
@@ -320,8 +321,10 @@ async def test_presentation_is_stored_and_reused_without_rebuilding(
     assert calls == []
 
 
-async def test_invalid_stored_presentation_is_rebuilt(client: AsyncClient, session: AsyncSession):
-    a = await _setup(session)
+async def test_invalid_stored_presentation_is_rebuilt(
+    client: AsyncClient, session: AsyncSession, tenant: Member
+):
+    a = await _setup(session, tenant)
     stats = await _evidence(session, a, _trace_stats(SLOW))
     turn = await _answered(session, a, "Which endpoint is slowest?", "x", [stats])
     tampered = {
@@ -342,9 +345,11 @@ async def test_invalid_stored_presentation_is_rebuilt(client: AsyncClient, sessi
     assert body["blocks"][0] == {"type": "markdown", "markdown": "x"}
 
 
-async def test_presentation_api_boundaries(client: AsyncClient, session: AsyncSession):
-    a = await _setup(session)
-    other = await _setup(session)
+async def test_presentation_api_boundaries(
+    client: AsyncClient, session: AsyncSession, tenant: Member
+):
+    a = await _setup(session, tenant)
+    other = await _setup(session, tenant)
     pending = await session.get(InvestigationTurn, a.turn_id)
 
     assert (

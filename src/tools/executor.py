@@ -46,6 +46,7 @@ from src.models import (
     ToolCall,
     ToolCallStatus,
     ToolCategory,
+    can_use_process_credentials,
 )
 from src.models.evidence import MAX_DATA_JSON_BYTES
 from src.models.evidence import MAX_SUMMARY_CHARS as MAX_EVIDENCE_SUMMARY_CHARS
@@ -240,7 +241,12 @@ async def _admit_in(
     # the concurrency limit and idempotency lookups cannot race each other.
     row = (
         await session.execute(
-            select(InvestigationAssignment, Investigation.status, Environment)
+            select(
+                InvestigationAssignment,
+                Investigation.status,
+                Investigation.organization_id,
+                Environment,
+            )
             .join(Investigation, Investigation.id == InvestigationAssignment.investigation_id)
             .join(Environment, Environment.id == InvestigationAssignment.environment_id)
             .where(InvestigationAssignment.id == context.assignment_id)
@@ -255,7 +261,7 @@ async def _admit_in(
             status=ToolCallStatus.REJECTED,
             error=ToolError(code="policy.unknown_assignment", message="assignment does not exist"),
         )
-    assignment, investigation_status, environment = row
+    assignment, investigation_status, organization_id, environment = row
     await _expire_stale(session, assignment.id)
 
     input_json = (
@@ -267,12 +273,28 @@ async def _admit_in(
         input_json = {"_omitted": f"arguments exceeded {MAX_INPUT_JSON_BYTES} bytes"}
 
     try:
-        if (assignment.investigation_id, assignment.environment_id) != (
+        # The organization comes from the token, issued from these same rows; a token for
+        # one tenant can never act on another's assignment, and an environment can never
+        # serve an investigation of another organization (also a database invariant).
+        if (
+            assignment.investigation_id,
+            assignment.environment_id,
+            organization_id,
+            environment.organization_id,
+        ) != (
             context.investigation_id,
             context.environment_id,
+            context.organization_id,
+            context.organization_id,
         ):
             raise Rejection(
                 "policy.context_mismatch", "execution context does not match the assignment"
+            )
+        # Before idempotent replay too: without credentials nothing is served (D033).
+        if not can_use_process_credentials(environment):
+            raise Rejection(
+                "policy.credentials_not_configured",
+                "this environment has no telemetry credentials configured",
             )
 
         if context.idempotency_key is not None:
@@ -334,6 +356,9 @@ async def _admit_in(
                 select(Environment.metadata_json).where(
                     Environment.status == EnvironmentStatus.ACTIVE,
                     Environment.id != environment.id,
+                    # Ambiguity is among environments sharing this telemetry backend: the
+                    # process-wide one. Others cannot claim (or block) its identities.
+                    Environment.organization_id.is_(None) | Environment.process_credentials,
                 )
             )
         ).all()

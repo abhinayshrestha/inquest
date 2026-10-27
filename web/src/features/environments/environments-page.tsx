@@ -1,5 +1,6 @@
 import { PageHeader } from '@/components/page-header'
 
+import { CreateEnvironment } from './create-environment'
 import { EnvironmentList } from './environment-list'
 
 export default function EnvironmentsPage() {
@@ -7,9 +8,12 @@ export default function EnvironmentsPage() {
     <>
       <PageHeader
         title="Environments"
-        description="Infrastructure Inquest investigates. Configuration and credentials will be managed here by each environment's owner (planned)."
+        description="Infrastructure Inquest investigates: telemetry scope, provider status and investigations."
       />
-      <EnvironmentList />
+      <div className="space-y-6">
+        <EnvironmentList />
+        <CreateEnvironment />
+      </div>
     </>
   )
 }

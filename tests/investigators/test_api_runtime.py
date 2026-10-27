@@ -13,12 +13,12 @@ import httpx2
 import pytest
 from sqlalchemy import select
 
+from src.auth.settings import load_auth_settings
 from src.db.session import SessionLocal
 from src.investigators import lifecycle, runner, runtime
 from src.investigators.checkpoint import thread_id as assignment_thread_id
 from src.investigators.runner import investigation_lock, turn_thread_id
 from src.investigators.schemas import Verdict
-from src.main import app
 from src.models import (
     AssignmentStatus,
     Investigation,
@@ -36,13 +36,14 @@ from tests.investigators.test_main_graph import (  # noqa: F401
     ANSWER,
     Crash,
     MainWorld,
+    built_main_world,
     compose,
     investigate,
     local_script,
-    main_world,
     rows,
 )
 from tests.mcp_server.conftest import signoz  # noqa: F401
+from tests.tenancy import Member, api_client, committed_members, configure_auth
 
 
 @pytest.fixture(autouse=True)
@@ -51,11 +52,24 @@ def mocked_signoz(signoz):  # noqa: F811
 
 
 @pytest.fixture
-async def api() -> AsyncIterator[httpx.AsyncClient]:
+async def member(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Member]:
+    configure_auth(monkeypatch)
+    async with committed_members() as (signed_in,):
+        yield signed_in
+    load_auth_settings.cache_clear()
+
+
+@pytest.fixture
+async def main_world(checkpointer, member: Member) -> AsyncIterator[MainWorld]:
+    # An organization's environment that an operator granted the development credentials.
+    async with built_main_world(checkpointer, member.owns | {"process_credentials": True}) as w:
+        yield w
+
+
+@pytest.fixture
+async def api(member: Member) -> AsyncIterator[httpx.AsyncClient]:
     # The real app and real sessions: the runtime's tasks must see committed rows.
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as c:
+    async with api_client(member) as c:
         yield c
 
 
@@ -155,7 +169,8 @@ async def test_runner_disabled_refuses_without_marking_the_turn(api, main_world)
     response = await api.post(f"/investigations/{main_world.investigation_id}/start")
     assert response.status_code == 503 and "INQUEST_RUNNER_ENABLED" in response.json()["detail"]
     assert (await turn_row(main_world.turn_id)).run_requested_at is None
-    assert (await api.post(f"/investigations/{uuid.uuid4()}/start")).status_code == 503
+    # Access is checked first: an investigation the caller cannot see is just not found.
+    assert (await api.post(f"/investigations/{uuid.uuid4()}/start")).status_code == 404
 
 
 async def test_concurrent_starts_accept_exactly_one(api, rt, main_world):  # noqa: F811

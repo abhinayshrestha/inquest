@@ -8,7 +8,6 @@ from typing import Any
 
 import httpx2
 import pytest
-from httpx import AsyncClient
 from sqlalchemy import select, text
 
 from src.db.session import SessionLocal
@@ -25,6 +24,8 @@ from src.models import (
     TurnDecision,
     TurnStatus,
 )
+from src.schemas.investigation import InvestigationRead
+from src.services import investigations
 from src.services import turns as turn_services
 from tests.investigators.conftest import MCP_SETTINGS, ScriptedModel, refs_in
 from tests.investigators.test_main_graph import (  # noqa: F401
@@ -339,7 +340,7 @@ async def test_cancelled_follow_up_keeps_history(main_world, go, mcp_app, checkp
 # --- API -----------------------------------------------------------------------------------
 
 
-async def test_api_returns_turns_and_report_references(go, main_world, signoz, client: AsyncClient):  # noqa: F811
+async def test_api_shape_returns_turns_and_report_references(go, main_world, signoz):  # noqa: F811
     signoz("trace_stats_scalar.json")
     await first_turn(go, main_world)
     turn_2 = await ask(main_world, "Are there errors in the last 30 minutes?")
@@ -348,7 +349,11 @@ async def test_api_returns_turns_and_report_references(go, main_world, signoz, c
                                        follow_up_answer(report=revised_report())]),
              local_script(main_world.service), turn_id=turn_2)  # fmt: skip
 
-    body = (await client.get(f"/investigations/{main_world.investigation_id}")).json()
+    # The API's response model over the stored investigation (the route itself also needs
+    # a member of the investigation's organization; see test_tenant_isolation).
+    async with SessionLocal() as s:
+        stored = await investigations.get_investigation(s, main_world.investigation_id)
+    body = InvestigationRead.model_validate(stored).model_dump(mode="json")
 
     assert [(t["seq"], t["status"]) for t in body["turns"]] == [(1, "completed"), (2, "completed")]
     assert body["turns"][1]["answer_json"]["report_version"] == 2

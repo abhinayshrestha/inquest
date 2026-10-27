@@ -338,14 +338,15 @@ describe('conversation', () => {
     expect(MockEventSource.instances).toHaveLength(0)
 
     renderRoute('/investigations/not-a-uuid')
-    expect((await screen.findAllByText('Investigation not found')).length).toBe(2)
+    await waitFor(() => expect(screen.getAllByText('Investigation not found')).toHaveLength(2))
     expect(requestsTo(fetchMock, 'GET', '/investigations/not-a-uuid')).toHaveLength(0)
   })
 
   it('shows a loading skeleton, then a retryable error', async () => {
     mockFetch({})
     renderRoute(PATH)
-    expect(screen.getByRole('status', { name: 'Loading page' })).toBeInTheDocument()
+    // Session and organization first, then the investigation itself.
+    expect(screen.getByRole('status')).toBeInTheDocument()
     expect(await screen.findByText('Backend unreachable')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /try again/i })).toBeInTheDocument()
   })
@@ -414,6 +415,8 @@ describe('response blocks', () => {
     await user.click(screen.getByRole('link', { name: /report v1/i }))
     await screen.findByRole('heading', { level: 1, name: 'Report v1' })
     await router.navigate(-1)
+    // The report page shows the same chart (reused evidence views); wait for the conversation.
+    await screen.findByRole('heading', { level: 1, name: 'API latency on /slow' })
     expect(
       await screen.findByRole('figure', { name: 'p95 latency by operation' }),
     ).toBeInTheDocument()

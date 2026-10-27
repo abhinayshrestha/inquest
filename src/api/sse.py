@@ -18,6 +18,8 @@ from src.services.progress import list_progress_events
 
 POLL_SECONDS = 0.5
 KEEPALIVE_SECONDS = 15.0
+# How long a revoked membership or ended session can keep an open stream alive.
+RECHECK_SECONDS = 5.0
 BATCH = 200
 # Client reconnect delay, in milliseconds.
 RETRY_MS = 3000
@@ -54,13 +56,20 @@ async def event_stream(
     after: int,
     follow: bool,
     is_disconnected: Callable[[], Awaitable[bool]],
+    still_allowed: Callable[[], Awaitable[bool]] | None = None,
 ) -> AsyncIterator[str]:
     yield f"retry: {RETRY_MS}\n\n"
     cursor = after
-    quiet_since = time.monotonic()
+    quiet_since = checked = time.monotonic()
     while True:
         if await is_disconnected():
             return
+        if still_allowed is not None and time.monotonic() - checked >= RECHECK_SECONDS:
+            if not await still_allowed():
+                # A distinct event so the browser closes instead of reconnecting.
+                yield 'event: access_revoked\ndata: {"reason": "access_revoked"}\n\n'
+                return
+            checked = time.monotonic()
         async with SessionLocal() as s:
             events = await list_progress_events(s, investigation_id, after_id=cursor, limit=BATCH)
         for event in events:

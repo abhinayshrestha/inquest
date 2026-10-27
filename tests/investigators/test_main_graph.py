@@ -7,6 +7,7 @@ import json
 import re
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -91,12 +92,23 @@ class MainWorld:
 
 @pytest.fixture
 async def main_world(checkpointer) -> AsyncIterator[MainWorld]:
+    async with built_main_world(checkpointer) as world:
+        yield world
+
+
+@asynccontextmanager
+async def built_main_world(
+    checkpointer, environment_fields: dict[str, Any] | None = None
+) -> AsyncIterator[MainWorld]:
+    """A committed investigation with turn 1; ownerless unless `environment_fields` place
+    it in an organization (the investigation follows its environment)."""
     suffix = uuid.uuid4().hex[:8]
     async with SessionLocal() as s:
         environment = Environment(
             name=f"env-{suffix}",
             type=EnvironmentType.LOCAL,
             metadata_json={"signoz": {"hosts": [f"host-{suffix}"], "services": [f"svc-{suffix}"]}},
+            **(environment_fields or {}),
         )
         s.add(environment)
         await s.commit()

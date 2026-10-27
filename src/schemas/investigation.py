@@ -90,6 +90,8 @@ class InvestigationRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
+    # Only members of this organization can read the investigation (D033).
+    organization_id: uuid.UUID | None
     title: str
     question: str
     status: InvestigationStatus
@@ -142,6 +144,10 @@ class InvestigationListItem(BaseModel):
     environments: list[EnvironmentSummary]
     turn_count: int
     latest_report_version: int | None
+    # Failed or cancelled turns return the investigation to idle (D016); the latest turn's
+    # status is what says whether the last question was answered.
+    latest_turn_status: TurnStatus | None
+    latest_turn_completed_at: datetime | None
 
 
 class InvestigationPage(BaseModel):
@@ -202,3 +208,45 @@ class HypothesisCitation(BaseModel):
 Citation = Annotated[
     EvidenceCitation | FindingCitation | HypothesisCitation, Field(discriminator="kind")
 ]
+
+
+class OverviewCounts(BaseModel):
+    """Counts of persisted records only: no derived health, alert or uptime figures."""
+
+    investigations_total: int
+    # Every InvestigationStatus, zero-filled.
+    investigations_by_status: dict[InvestigationStatus, int]
+    # Investigations grouped by the status of their latest turn (one per investigation).
+    latest_turn_by_status: dict[TurnStatus, int]
+    turns_total: int
+    turns_by_status: dict[TurnStatus, int]
+    environments_total: int
+    environments_active: int
+    reports_total: int
+    investigations_with_reports: int
+
+
+ReportOutcome = Literal["root_cause_identified", "probable_cause", "inconclusive"]
+
+
+class ReportListItem(BaseModel):
+    """One report version, with enough investigation context to find and open it."""
+
+    id: uuid.UUID
+    investigation_id: uuid.UUID
+    investigation_title: str
+    investigation_status: InvestigationStatus
+    environments: list[EnvironmentSummary]
+    version: int
+    is_latest: bool
+    turn_id: uuid.UUID
+    turn_seq: int
+    created_at: datetime
+    # None for a stored report whose outcome is missing or not one of the known values.
+    outcome: ReportOutcome | None
+    conclusion_count: int
+
+
+class ReportListPage(BaseModel):
+    items: list[ReportListItem]
+    next_offset: int | None

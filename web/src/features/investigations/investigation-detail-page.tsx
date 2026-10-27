@@ -14,6 +14,9 @@ import { isUuid } from '@/lib/ids'
 import { buildActivity } from '@/lib/sse/activity'
 import { REFRESH_EVENTS } from '@/lib/sse/events'
 import { useEventStream } from '@/lib/sse/use-event-stream'
+import { SESSION_KEY } from '@/app/contexts/auth'
+import { ME_KEY } from '@/app/contexts/organization'
+import { InOrganization } from '@/features/organizations/organization-gate'
 import { cn } from 'cn'
 
 import { CitationSheet } from './conversation/citation-sheet'
@@ -46,7 +49,7 @@ function NotFound() {
       <EmptyState
         icon={SearchX}
         title="Investigation not found"
-        description="No investigation exists with this ID."
+        description="It does not exist, or it belongs to an organization you are not a member of."
       />
     </>
   )
@@ -82,6 +85,15 @@ function Conversation({ investigation }: { investigation: InvestigationRead }) {
   const location = useLocation()
   const onEvent = useRefreshOnEvents(id)
   const stream = useEventStream(id, onEvent)
+  const client = useQueryClient()
+  // Access ended while watching: re-read the investigation (now not found) and the
+  // memberships, so the page and the organization switcher show the new state.
+  useEffect(() => {
+    if (stream.status !== 'revoked') return
+    void client.invalidateQueries({ queryKey: queryKeys.investigation(id) })
+    void client.invalidateQueries({ queryKey: ME_KEY })
+    void client.invalidateQueries({ queryKey: SESSION_KEY })
+  }, [client, id, stream.status])
   const activity = useMemo(() => buildActivity(stream.events), [stream.events])
   const { open: openCitation } = useCitationParam()
   const start = useStartInvestigation(id)
@@ -233,7 +245,12 @@ function InvestigationView({ id }: { id: string }) {
       </>
     )
   }
-  return <Conversation investigation={query.data} />
+  // The live stream lives inside: switching organization unmounts it and closes it.
+  return (
+    <InOrganization organizationId={query.data.organization_id}>
+      <Conversation investigation={query.data} />
+    </InOrganization>
+  )
 }
 
 export default function InvestigationDetailPage() {

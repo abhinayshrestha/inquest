@@ -5,7 +5,27 @@ import type { z } from 'zod'
 export const API_BASE = '/api'
 
 export type ApiErrorKind =
-  'network' | 'not_found' | 'conflict' | 'unavailable' | 'validation' | 'invalid_response' | 'http'
+  | 'network'
+  | 'unauthorized'
+  | 'forbidden'
+  | 'not_found'
+  | 'conflict'
+  | 'gone'
+  | 'unavailable'
+  | 'validation'
+  | 'invalid_response'
+  | 'http'
+
+// The session's CSRF token, from GET /auth/session. Kept in memory only (never in
+// storage) and sent as X-CSRF-Token on every write; the session cookie itself is
+// HttpOnly and never visible to scripts.
+let csrfToken: string | null = null
+
+export function setCsrfToken(token: string | null) {
+  csrfToken = token
+}
+
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 
 // A class so callers can tell API failures from programming errors with instanceof.
 export class ApiError extends Error {
@@ -21,7 +41,10 @@ export class ApiError extends Error {
 }
 
 function kindFor(status: number): ApiErrorKind {
+  if (status === 401) return 'unauthorized'
+  if (status === 403) return 'forbidden'
   if (status === 404) return 'not_found'
+  if (status === 410) return 'gone'
   if (status === 409) return 'conflict'
   if (status === 422) return 'validation'
   if (status === 503) return 'unavailable'
@@ -67,6 +90,9 @@ export async function request<S extends z.ZodType>(
       headers: {
         Accept: 'application/json',
         ...(json === undefined ? {} : { 'Content-Type': 'application/json' }),
+        ...(csrfToken && !SAFE_METHODS.has((rest.method ?? 'GET').toUpperCase())
+          ? { 'X-CSRF-Token': csrfToken }
+          : {}),
         ...headers,
       },
       body: json === undefined ? rest.body : JSON.stringify(json),

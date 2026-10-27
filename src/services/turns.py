@@ -98,7 +98,12 @@ def _move(turn: InvestigationTurn, to: TurnStatus) -> None:
 
 
 async def create_follow_up_turn(
-    session: AsyncSession, investigation_id: uuid.UUID, question: str, *, request_run: bool = False
+    session: AsyncSession,
+    investigation_id: uuid.UUID,
+    question: str,
+    *,
+    request_run: bool = False,
+    created_by: uuid.UUID | None = None,
 ) -> InvestigationTurn:
     """A new question for an idle investigation. Refused while another turn is active or
     once the investigation is closed. `request_run` also accepts it for execution in the
@@ -133,6 +138,7 @@ async def create_follow_up_turn(
         question=question,
         status=TurnStatus.PENDING,
         run_requested_at=datetime.now(UTC) if request_run else None,
+        created_by_user_id=created_by,
     )
     session.add(turn)
     try:

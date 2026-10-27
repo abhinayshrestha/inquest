@@ -32,7 +32,9 @@ def token_for(target: World, **kwargs: Any) -> str:
         investigation_id=target.investigation_id,
         environment_id=target.environment_id,
     )
-    return mint_assignment_token(assignment, MCP_SETTINGS, **kwargs)
+    return mint_assignment_token(
+        assignment, MCP_SETTINGS, organization_id=kwargs.pop("organization_id", None), **kwargs
+    )
 
 
 @pytest.fixture

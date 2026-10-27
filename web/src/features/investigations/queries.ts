@@ -18,7 +18,9 @@ import {
   queryKeys,
   startInvestigation,
   type InvestigationCreate,
+  type InvestigationFilters,
 } from '@/lib/api'
+import { useOrganizationId } from '@/app/contexts/organization'
 
 const PAGE_SIZE = 20
 
@@ -30,11 +32,30 @@ export function useInvestigation(id: string, { enabled = true } = {}) {
   })
 }
 
-export function useInvestigationList(pageSize = PAGE_SIZE) {
+export function useInvestigationList(
+  pageSize = PAGE_SIZE,
+  environmentId?: string,
+  {
+    statuses,
+    latestTurnStatuses,
+  }: Pick<InvestigationFilters, 'statuses' | 'latestTurnStatuses'> = {},
+) {
+  const organizationId = useOrganizationId()
   return useInfiniteQuery({
-    queryKey: [...queryKeys.investigations, pageSize],
+    queryKey: [
+      ...queryKeys.investigationList(organizationId ?? ''),
+      pageSize,
+      environmentId ?? null,
+      statuses ?? [],
+      latestTurnStatuses ?? [],
+    ],
     queryFn: ({ pageParam, signal }) =>
-      listInvestigations({ limit: pageSize, offset: pageParam }, { signal }),
+      listInvestigations(
+        organizationId!,
+        { limit: pageSize, offset: pageParam, environmentId, statuses, latestTurnStatuses },
+        { signal },
+      ),
+    enabled: organizationId !== null,
     initialPageParam: 0,
     getNextPageParam: (last) => last.next_offset ?? undefined,
   })
