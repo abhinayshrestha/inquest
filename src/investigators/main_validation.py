@@ -406,6 +406,19 @@ def substantive(answer_md: str) -> bool:
     return False
 
 
+# Through function calling, Ultra sometimes returns the whole markdown answer on one line,
+# with runs of spaces where its line breaks were (live run 2026-10-29). A leading heading
+# then swallows the answer: "no prose", and one giant heading in the UI.
+LOST_BREAKS = re.compile(r" {2,}")
+
+
+def restore_line_breaks(answer_md: str) -> str:
+    """Only a single-line answer: multi-line markdown is kept exactly as written."""
+    if "\n" in answer_md.strip():
+        return answer_md
+    return LOST_BREAKS.sub("\n\n", answer_md.strip())
+
+
 # Problems that leave the answer itself unusable: it is replaced by fallback_answer.
 ANSWER_BLOCKING = {"uncited_answer", "unusable_answer"}
 
@@ -416,7 +429,7 @@ def validate_answer(
     """The cleaned answer also carries `report_problems`: the subset about the report, so a
     follow-up can refuse a revision that is still wrong without discarding the answer."""
     problems: list[str] = []
-    answer_md, cited = _clean_text(draft.answer_md, memory, "answer", problems)
+    answer_md, cited = _clean_text(restore_line_breaks(draft.answer_md), memory, "answer", problems)
     answer_md = _answer_relationships(answer_md, memory, problems)
     if not substantive(answer_md):
         add_problem(

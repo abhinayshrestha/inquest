@@ -335,6 +335,40 @@ def test_short_real_answers_are_substantive():
     assert substantive(f"Yes, still failing {fd('68d3222a')}.") and answer_has_content("?")
 
 
+def test_a_one_line_answer_behind_a_heading_gets_its_line_breaks_back():
+    # Live run 2026-10-29: Ultra's whole answer on one line, breaks turned into spaces.
+    one_line = (
+        f"## Why latency spiked  The checkout API is slow {ev('92a5065f')}.  "
+        f"- **GET /slow** p95 1.5 s {fd('68d3222a')}"
+    )
+    clean, problems = validate_answer(
+        AnswerDraft(answer_md=one_line, report=V2),
+        build_memory(raw_memory()),
+        report_required=False,
+    )
+    assert not problem_codes(problems) & ANSWER_BLOCKING
+    assert clean["answer_md"].splitlines()[0] == "## Why latency spiked"
+    assert f"- **GET /slow** p95 1.5 s {fd('68d3222a')}" in clean["answer_md"].splitlines()
+
+
+@pytest.mark.parametrize(
+    "md", ["## Root cause", "## Root cause  ## Details", f"## Refs  {ev('92a5065f')}"]
+)
+def test_restored_line_breaks_never_make_a_heading_or_refs_an_answer(md):
+    _, problems = validate_answer(
+        AnswerDraft(answer_md=md, report=V2), build_memory(raw_memory()), report_required=False
+    )
+    assert "unusable_answer" in problem_codes(problems)
+
+
+def test_multi_line_answers_keep_their_spacing():
+    md = f"Line one  with two spaces {ev('92a5065f')}.\nLine two."
+    clean, _ = validate_answer(
+        AnswerDraft(answer_md=md, report=V2), build_memory(raw_memory()), report_required=False
+    )
+    assert clean["answer_md"].startswith("Line one  with two spaces")
+
+
 def test_live_turn_2_gets_a_labelled_fallback_from_its_own_findings():
     memory = build_memory(raw_memory())
     unresolved = ["[uncited_answer] x", "[unusable_answer] y", "[unsupported_outcome] z"]
