@@ -66,13 +66,18 @@ describe('organization scope', () => {
     expect(MockEventSource.instances).toHaveLength(1)
   })
 
-  it('asks signed-out visitors to sign in and requests no organization data', async () => {
+  it('sends signed-out visitors to the login page and requests no organization data', async () => {
     const fetchMock = mockFetch({
       'GET /auth/session': { body: { ...SIGNED_IN, authenticated: false, user: null } },
     })
-    for (const path of ['/', '/environments', '/investigations', '/reports', PATH]) {
-      const { unmount } = renderRoute(path)
-      expect(await screen.findByText('Sign in required')).toBeInTheDocument()
+    const pages = ['/', '/environments', '/investigations', '/reports', PATH, '/organizations']
+    for (const path of [...pages, '/settings']) {
+      const { unmount, router } = renderRoute(path)
+      expect(await screen.findByRole('heading', { name: 'Welcome back' })).toBeInTheDocument()
+      expect(router.state.location.pathname).toBe('/login')
+      expect(router.state.location.search).toBe(
+        path === '/' ? '' : `?return_to=${encodeURIComponent(path)}`,
+      )
       unmount()
     }
     const tenantCalls = fetchMock.mock.calls.filter(
@@ -133,9 +138,10 @@ describe('access ending while signed in', () => {
       'GET /auth/session': [{ body: SIGNED_IN }, { body: { ...SIGNED_IN, authenticated: false, user: null, csrf_token: null } }],
       'GET /environments': { status: 401, body: { detail: 'sign in required' } },
     }) // prettier-ignore
-    renderRoute('/environments')
-    // The sign-in gate replaces the page, not just an error message on it.
-    expect(await screen.findByText(/Sign in to see your organization/)).toBeInTheDocument()
+    const { router } = renderRoute('/environments')
+    // The login page replaces the app, not just an error message on the page.
+    expect(await screen.findByRole('heading', { name: 'Welcome back' })).toBeInTheDocument()
+    expect(router.state.location.search).toBe('?return_to=%2Fenvironments')
   })
 })
 

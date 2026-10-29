@@ -475,7 +475,10 @@ describe('access changing while the form is open', () => {
     })
     const view = renderRoute(`${PATH}?tab=ai`)
     await fillAndSave()
-    expect(await screen.findByText('Sign in required')).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Welcome back' })).toBeInTheDocument()
+    expect(view.router.state.location.search).toBe(
+      `?return_to=${encodeURIComponent(`${PATH}?tab=ai`)}`,
+    )
     expect(screen.queryByRole('form')).not.toBeInTheDocument()
     assertNoSecret(SECRET, view, fetchMock)
   })

@@ -17,7 +17,7 @@ import { SignOutEverywhereDialog } from './sign-out-everywhere-dialog'
 export function UserMenu() {
   const { status, user, signIn, signOut, signingOut } = useAuth()
   const [everywhere, setEverywhere] = useState(false)
-  // Rendered whatever the status: it reports success after this page has signed out.
+  // Rendered whatever the status, so a sign-out that is still finishing keeps its dialog.
   const dialog = <SignOutEverywhereDialog open={everywhere} onOpenChange={setEverywhere} />
   if (status === 'loading')
     return (

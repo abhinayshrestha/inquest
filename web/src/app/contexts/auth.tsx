@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { createContext, useContext, useEffect, useMemo, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 
 import { ApiError, setCsrfToken } from '@/lib/api/client'
 import {
@@ -17,10 +17,14 @@ import {
 // server checks the session and role on every request.
 
 export type AuthStatus = 'loading' | 'unavailable' | 'unconfigured' | 'signed_out' | 'signed_in'
+// How this page's session ended when the person ended it here; null for anything else
+// (expired, revoked, signed out in another tab), which returns them to the page they were on.
+export type SignOutKind = 'signed_out' | 'everywhere' | null
 
 type AuthState = {
   status: AuthStatus
   user: User | null
+  ended: SignOutKind
   signIn: (returnTo?: string) => void
   // Rejects when the sign-in could not be started (rate limit, sign-in unavailable).
   signInWithInvitation: (token: string, returnTo: string) => Promise<void>
@@ -60,14 +64,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Any 401 means the session ended (expired, revoked, signed out elsewhere): re-read it so
   // the UI shows signed-out states instead of a page of errors.
   useEffect(() => {
-    const ended = (error: unknown) => error instanceof ApiError && error.kind === 'unauthorized'
+    const unauthorized = (error: unknown) =>
+      error instanceof ApiError && error.kind === 'unauthorized'
     const refresh = () => void client.invalidateQueries({ queryKey: SESSION_KEY })
     const queries = client.getQueryCache().subscribe((event) => {
-      if (event.type === 'updated' && event.action.type === 'error' && ended(event.action.error))
+      if (
+        event.type === 'updated' &&
+        event.action.type === 'error' &&
+        unauthorized(event.action.error)
+      )
         refresh()
     })
     const mutations = client.getMutationCache().subscribe((event) => {
-      if (event.type === 'updated' && event.action.type === 'error' && ended(event.action.error))
+      if (
+        event.type === 'updated' &&
+        event.action.type === 'error' &&
+        unauthorized(event.action.error)
+      )
         refresh()
     })
     return () => {
@@ -82,9 +95,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     client.removeQueries({ predicate: (q) => q.queryKey[0] !== 'auth' })
     await client.invalidateQueries({ queryKey: SESSION_KEY })
   }
-  const signOut = useMutation({ mutationFn: logout, onSettled: forget })
+  const [ended, setEnded] = useState<SignOutKind>(null)
+  const signOut = useMutation({
+    mutationFn: logout,
+    onSuccess: () => setEnded('signed_out'),
+    onSettled: forget,
+  })
   // Only on success: after a failure the sessions, this one included, are unchanged.
-  const signOutEverywhere = useMutation({ mutationFn: logoutEverywhere, onSuccess: forget })
+  const signOutEverywhere = useMutation({
+    mutationFn: logoutEverywhere,
+    onSuccess: () => {
+      setEnded('everywhere')
+      return forget()
+    },
+  })
 
   const signedIn = session.data?.authenticated === true
   useEffect(() => {
@@ -118,6 +142,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return {
       status,
       user: data?.authenticated ? data.user : null,
+      ended,
       signIn: (returnTo = window.location.pathname) => {
         pageNavigation.assign(signInUrl(returnTo))
       },
@@ -133,7 +158,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       },
       signingOut: signOut.isPending || signOutEverywhere.isPending,
     }
-  }, [session.isPending, session.data, signOut, signOutEverywhere])
+  }, [session.isPending, session.data, ended, signOut, signOutEverywhere])
 
   return <AuthContext value={value}>{children}</AuthContext>
 }
