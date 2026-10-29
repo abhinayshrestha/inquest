@@ -2,12 +2,15 @@ import { lazy, Suspense, type ComponentType, type LazyExoticComponent } from 're
 import type { RouteObject } from 'react-router'
 
 import { PageSkeleton, type PageSkeletonVariant } from '@/components/skeletons'
+import { LOGIN_PATH } from '@/features/auth/login-path'
+import { FullPageLoader, RequireAuth } from '@/features/auth/require-auth'
 import { RequireOrganization } from '@/features/organizations/organization-gate'
 
 import { AppShell } from './layout/app-shell'
 import { NotFoundPage } from './not-found-page'
 import { RouteErrorPage } from './route-error-page'
 
+const LoginPage = lazy(() => import('@/features/auth/login-page'))
 const OverviewPage = lazy(() => import('@/features/overview/overview-page'))
 const InvestigationsPage = lazy(() => import('@/features/investigations/investigations-page'))
 const InvestigationDetailPage = lazy(
@@ -49,7 +52,26 @@ function page(
 
 export const routes: RouteObject[] = [
   {
+    path: LOGIN_PATH,
+    element: (
+      <Suspense fallback={<FullPageLoader label="Loading" />}>
+        <LoginPage />
+      </Suspense>
+    ),
+    errorElement: <RouteErrorPage />,
+  },
+  // Invitation links must open signed out: the page starts its own invitation sign-in.
+  {
     element: <AppShell />,
+    errorElement: <RouteErrorPage />,
+    children: [page('invitations/accept', AcceptInvitationPage, 'detail')],
+  },
+  {
+    element: (
+      <RequireAuth>
+        <AppShell />
+      </RequireAuth>
+    ),
     errorElement: <RouteErrorPage />,
     children: [
       page(undefined, OverviewPage, 'cards', TENANT),
@@ -62,7 +84,6 @@ export const routes: RouteObject[] = [
       page('reports', ReportsPage, 'list', TENANT),
       page('organizations', OrganizationsPage, 'cards'),
       page('organizations/:orgId', OrganizationDetailPage, 'detail'),
-      page('invitations/accept', AcceptInvitationPage, 'detail'),
       page('settings', SettingsPage, 'cards'),
       { path: '*', element: <NotFoundPage /> },
     ],

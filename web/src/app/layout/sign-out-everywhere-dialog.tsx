@@ -24,8 +24,8 @@ function failure(error: unknown) {
   return 'Could not sign out everywhere. Your sessions are unchanged; try again.'
 }
 
-/** Confirms and runs sign out everywhere (D043). Stays mounted after the page signs out,
- * so the person sees that it worked. */
+/** Confirms and runs sign out everywhere (D043). Once the session is gone the app moves to
+ * the login page, which says that it worked. */
 export function SignOutEverywhereDialog({
   open,
   onOpenChange,

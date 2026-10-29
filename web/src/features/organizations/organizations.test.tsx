@@ -77,18 +77,44 @@ describe('sign-in states', () => {
   it('fails closed when sign-in is not configured: no organization requests, no fallback', async () => {
     const fetchMock = mockFetch({ 'GET /auth/session': { body: SIGNED_OUT_UNCONFIGURED } })
     renderRoute('/organizations')
-    expect(await screen.findByText('Organizations need sign-in')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /sign in/i })).not.toBeInTheDocument()
+    expect(await screen.findByText('Sign-in is not configured')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /sign-on|sign in/i })).not.toBeInTheDocument()
     expect(requestsTo(fetchMock, 'GET', '/me')).toHaveLength(0)
   })
 
-  it('offers sign-in when signed out and sends the browser to the backend login', async () => {
+  it('sends signed-out visitors to the login page, then to the backend login', async () => {
     mockFetch({ 'GET /auth/session': { body: SIGNED_OUT } })
     const assign = vi.spyOn(pageNavigation, 'assign').mockImplementation(() => {})
-    renderRoute('/organizations')
-    const main = await screen.findByRole('main')
-    await userEvent.click(await within(main).findByRole('button', { name: 'Sign in' }))
-    expect(assign).toHaveBeenCalledWith('/api/auth/login?return_to=%2Forganizations')
+    const { router } = renderRoute('/organizations?tab=members')
+    expect(await screen.findByRole('heading', { name: 'Welcome back' })).toBeInTheDocument()
+    expect(router.state.location.pathname).toBe('/login')
+    await userEvent.click(screen.getByRole('button', { name: /continue with single sign-on/i }))
+    expect(assign).toHaveBeenCalledWith(
+      '/api/auth/login?return_to=%2Forganizations%3Ftab%3Dmembers',
+    )
+  })
+
+  it('never returns to another site after signing in', async () => {
+    mockFetch({ 'GET /auth/session': { body: SIGNED_OUT } })
+    const assign = vi.spyOn(pageNavigation, 'assign').mockImplementation(() => {})
+    for (const target of ['//evil.example', 'https://evil.example', '/\\evil.example', '/login']) {
+      const { unmount } = renderRoute(`/login?return_to=${encodeURIComponent(target)}`)
+      await userEvent.click(
+        await screen.findByRole('button', { name: /continue with single sign-on/i }),
+      )
+      expect(assign).toHaveBeenLastCalledWith('/api/auth/login?return_to=%2F')
+      unmount()
+    }
+  })
+
+  it('takes a signed-in visitor from the login page to where they were going', async () => {
+    mockFetch({
+      'GET /auth/session': { body: SIGNED_IN },
+      'GET /me': { body: { user: USER, memberships: [] } },
+    })
+    const { router } = renderRoute('/login?return_to=%2Forganizations')
+    expect(await screen.findByRole('heading', { level: 1, name: 'Organizations' }))
+    expect(router.state.location.pathname).toBe('/organizations')
   })
 
   it('shows the signed-in user and signs out with the CSRF token', async () => {
@@ -97,14 +123,17 @@ describe('sign-in states', () => {
       'GET /me': { body: { user: USER, memberships: [] } },
       'POST /auth/logout': { status: 204 },
     })
-    renderRoute('/organizations')
+    const { router } = renderRoute('/organizations')
     await userEvent.click(await screen.findByRole('button', { name: 'Account: Ada' }))
     await userEvent.click(await screen.findByRole('menuitem', { name: 'Sign out' }))
     await waitFor(() => expect(requestsTo(fetchMock, 'POST', '/auth/logout')).toHaveLength(1))
     expect(headerOf(requestsTo(fetchMock, 'POST', '/auth/logout')[0], 'X-CSRF-Token')).toBe(
       'csrf-from-session',
     )
-    expect(await screen.findByText('Sign in required')).toBeInTheDocument()
+    // A deliberate sign-out lands on the login page without a way back into the old page.
+    expect(await screen.findByText('You have signed out')).toBeInTheDocument()
+    expect(router.state.location.pathname).toBe('/login')
+    expect(router.state.location.search).toBe('?signed_out=signed_out')
   })
 
   it('signs out everywhere after confirming, with the CSRF token, and says so', async () => {
@@ -120,12 +149,11 @@ describe('sign-in states', () => {
     expect(within(dialog).getByText(/organizations, investigations and reports are kept/))
     expect(requestsTo(fetchMock, 'POST', '/auth/logout-everywhere')).toHaveLength(0)
     await userEvent.click(within(dialog).getByRole('button', { name: 'Sign out everywhere' }))
-    expect(await within(dialog).findByText('Signed out everywhere')).toBeInTheDocument()
+    expect(await screen.findByText(/ended, on every device/)).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Welcome back' })).toBeInTheDocument()
     const [call] = requestsTo(fetchMock, 'POST', '/auth/logout-everywhere')
     expect(headerOf(call, 'X-CSRF-Token')).toBe('csrf-from-session')
     expect(requestsTo(fetchMock, 'POST', '/auth/logout')).toHaveLength(0)
-    await userEvent.click(within(dialog).getByRole('button', { name: 'Close' }))
-    expect(await screen.findByText('Sign in required')).toBeInTheDocument()
   })
 
   it.each([
@@ -175,14 +203,14 @@ describe('sign-in states', () => {
 })
 
 describe('sign-in failures', () => {
-  it('explains a failed sign-in without echoing the code', async () => {
+  it('explains a failed sign-in on the login page without echoing the code', async () => {
     mockFetch({ 'GET /auth/session': { body: SIGNED_OUT } })
-    renderRoute('/organizations?auth_error=%3Cscript%3E')
+    const { router } = renderRoute('/organizations?auth_error=%3Cscript%3E')
     expect(await screen.findByText('Sign-in failed')).toBeInTheDocument()
     expect(screen.getByText(/could not be verified/)).toBeInTheDocument()
     expect(screen.queryByText(/script/)).not.toBeInTheDocument()
-    await userEvent.click(screen.getByRole('button', { name: 'Dismiss' }))
-    expect(screen.queryByText('Sign-in failed')).not.toBeInTheDocument()
+    // The error code is not carried back to the page after signing in.
+    expect(router.state.location.search).toBe('?auth_error=%3Cscript%3E&return_to=%2Forganizations')
   })
 
   it('tells an authenticated but unapproved visitor what to do, and nothing else', async () => {

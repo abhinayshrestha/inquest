@@ -1,7 +1,7 @@
-import { ScanSearch } from 'lucide-react'
 import { Link } from 'react-router'
 
 import { cn } from 'cn'
+import { LogoMark, Wordmark } from '@/components/logo'
 
 export function Brand({
   compact = false,
@@ -20,10 +20,8 @@ export function Brand({
         compact && 'justify-center',
       )}
     >
-      <span className="flex size-8 items-center justify-center rounded-md bg-sidebar-primary text-sidebar-primary-foreground">
-        <ScanSearch aria-hidden className="size-4" />
-      </span>
-      {!compact && <span className="text-base tracking-tight">Inquest</span>}
+      <LogoMark />
+      {!compact && <Wordmark />}
     </Link>
   )
 }

@@ -96,6 +96,7 @@ describe('routing', () => {
   })
 
   it('renders a not-found page for unknown routes', async () => {
+    backend()
     renderRoute('/does-not-exist')
     expect(
       await screen.findByRole('heading', { level: 1, name: 'Page not found' }),
