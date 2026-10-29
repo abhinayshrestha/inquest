@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: inquest
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: inquest
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U inquest -d inquest"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      # Throwaway values for the CI database only; no provider is called.
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: inquest
+      POSTGRES_PASSWORD: ci-only-password
+      POSTGRES_DB: inquest
+      POSTGRES_TEST_DB: inquest_test
+      LOG_LEVEL: INFO
+      DATABASE_ECHO: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - name: Create and migrate the test database
+        run: |
+          PGPASSWORD="$POSTGRES_PASSWORD" psql -h localhost -U inquest -d inquest \
+            -c 'CREATE DATABASE inquest_test OWNER inquest'
+          APP_ENV=test uv run alembic upgrade head
+      - name: Tests (no Nebius or SigNoz calls; live tests skip themselves)
+        run: uv run pytest -q
+
+  frontend:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm format:check
+      - run: pnpm test
+      - run: pnpm build
