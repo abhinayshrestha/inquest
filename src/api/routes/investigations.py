@@ -1,4 +1,5 @@
 import uuid
+import weakref
 from typing import Annotated
 
 from fastapi import APIRouter, Header, HTTPException, Path, Query, Request, status
@@ -8,6 +9,7 @@ from sqlalchemy import select
 from src.api.deps import OrganizationQuery, SessionDep
 from src.api.sse import cursor_from, event_stream
 from src.auth.deps import CurrentUser, Identity, WritingUser
+from src.credentials import resolver
 from src.db.session import SessionLocal
 from src.investigators import runtime
 from src.investigators.runner import RunnerBusy
@@ -31,7 +33,7 @@ from src.schemas.investigation import (
     TurnCancelled,
 )
 from src.schemas.presentation import Presentation
-from src.services import access, citations, investigations, presentation, turns
+from src.services import access, citations, investigations, leases, limits, presentation, turns
 
 router = APIRouter(prefix="/investigations", tags=["investigations"])
 
@@ -54,15 +56,35 @@ async def _investigation(
         raise _not_found() from exc
 
 
+async def _submitted(session: SessionDep, identity: Identity, investigation_id: uuid.UUID) -> None:
+    """A start or follow-up, counted against the caller's and the organization's budgets
+    once the caller is known to belong to it."""
+    investigation = await _investigation(session, identity, investigation_id)
+    await limits.hit(
+        session, "turn_submit", user=identity.user.id, organization=investigation.organization_id
+    )
+
+
 async def _runnable(session: SessionDep, investigation_id: uuid.UUID) -> None:
-    # Tenant environments never run on the backend's process-wide credentials unless an
-    # operator granted them; their own credentials arrive in Phase 7C (D033).
-    if not await access.investigation_runnable(session, investigation_id):
+    # Checked before the runner, which checks again: the environment's own credentials,
+    # or an operator grant where this server permits one (D033, D034).
+    code = await resolver.investigation_refusal(session, investigation_id)
+    if code is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="configuration required: this environment has no credentials to run "
-            "investigations with",
+            detail=f"{code.replace('_', ' ')}: {resolver.REFUSALS[code]}",
         )
+
+
+def _too_busy(exc: leases.QueueFull) -> HTTPException:
+    # Backpressure, not an error in the request: the same request succeeds once one of
+    # the active investigations ends.
+    return HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail=f"too many active investigations: the {exc.scope} limit of {exc.limit} running "
+        "or queued turns is reached; try again when one finishes",
+        headers={"Retry-After": "30"},
+    )
 
 
 def _runtime() -> runtime.Runtime:
@@ -89,7 +111,11 @@ async def create_investigation(
 ) -> Investigation:
     """Created in the environment's organization, which the caller must belong to."""
     try:
-        await access.environment_for(session, identity.user, data.environment_id)
+        environment = await access.environment_for(session, identity.user, data.environment_id)
+        await limits.hit(
+            session, "investigation_create", user=identity.user.id,
+            organization=environment.organization_id,
+        )  # fmt: skip
         return await investigations.create_investigation(session, data, created_by=identity.user.id)
     except (access.NoAccess, investigations.EnvironmentNotFound) as exc:
         raise HTTPException(
@@ -170,7 +196,7 @@ async def start_investigation(
     investigation_id: uuid.UUID, session: SessionDep, identity: WritingUser
 ) -> TurnAccepted:
     """Runs the initial question (turn 1) with the Main Investigator."""
-    await _investigation(session, identity, investigation_id)
+    await _submitted(session, identity, investigation_id)
     await _runnable(session, investigation_id)
     _runtime()
     turn = await session.scalar(
@@ -183,6 +209,8 @@ async def start_investigation(
     try:
         turn = await turns.request_turn_run(session, turn.id)
         runtime.submit(investigation_id, turn.id)
+    except leases.QueueFull as exc:
+        raise _too_busy(exc) from exc
     except (turns.TurnConflict, RunnerBusy) as exc:
         raise _conflict(exc) from exc
     return _accepted(turn)
@@ -197,7 +225,7 @@ async def ask_follow_up(
     investigation_id: uuid.UUID, data: FollowUpCreate, session: SessionDep, identity: WritingUser
 ) -> TurnAccepted:
     """A follow-up question on an idle investigation, accepted and run as a new turn."""
-    await _investigation(session, identity, investigation_id)
+    await _submitted(session, identity, investigation_id)
     await _runnable(session, investigation_id)
     _runtime()
     try:
@@ -209,6 +237,8 @@ async def ask_follow_up(
             created_by=identity.user.id,
         )
         runtime.submit(investigation_id, turn.id)
+    except leases.QueueFull as exc:
+        raise _too_busy(exc) from exc
     except investigations.InvestigationNotFound as exc:
         raise _not_found() from exc
     except (turns.TurnConflict, investigations.InvalidTransition, RunnerBusy) as exc:
@@ -295,19 +325,37 @@ async def stream_events(
     access_revoked event once either is gone."""
     await _investigation(session, identity, investigation_id)
     auth_session_id = identity.session.id
+    # The stream reads with its own short sessions; the request's session would otherwise
+    # keep a pooled connection (idle in transaction) for as long as the stream is open.
+    # Ending its (read-only) transaction returns the connection to the pool.
+    await session.commit()
+    # Each open stream polls the database: bounded per user and per process.
+    release = limits.take_stream_slot(identity.user.id)
 
     async def allowed() -> bool:
         async with SessionLocal() as s:
             return await access.still_allowed(s, auth_session_id, investigation_id)
 
+    stream = event_stream(
+        investigation_id,
+        after=cursor_from(last_event_id, after),
+        follow=follow,
+        is_disconnected=request.is_disconnected,
+        still_allowed=allowed,
+    )
+
+    async def body():
+        try:
+            async for chunk in stream:
+                yield chunk
+        finally:
+            release()
+
+    iterator = body()
+    # A response that never starts streaming (client gone first) never runs the finally.
+    weakref.finalize(iterator, release)
     return StreamingResponse(
-        event_stream(
-            investigation_id,
-            after=cursor_from(last_event_id, after),
-            follow=follow,
-            is_disconnected=request.is_disconnected,
-            still_allowed=allowed,
-        ),
+        iterator,
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

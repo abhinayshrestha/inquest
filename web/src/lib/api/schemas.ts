@@ -1,4 +1,4 @@
-import { z } from 'zod'
+import { z } from '@/lib/zod'
 
 // Mirrors the FastAPI response models in src/schemas/ and the enums in src/models/.
 // Change these only after the backend contract changes; never add fields the backend
@@ -167,7 +167,7 @@ export const environmentList = z.array(environmentListItem)
 const providerStatus = z.object({
   provider: z.string(),
   // process_environment: the backend's development settings (operator grant only);
-  // environment: this environment's own credentials, which arrive in Phase 7C.
+  // environment: this environment's own credentials (D034).
   source: z.enum(['process_environment', 'environment']),
   configured: z.boolean(),
   issues: z.array(z.string()),
@@ -178,7 +178,12 @@ export const environmentDetail = environmentSummary.extend({
   updated_at: timestamp,
   organization_id: id.nullable(),
   owner_user_id: id.nullable(),
-  credentials: z.enum(['process_development', 'configuration_required']),
+  credentials: z.enum([
+    'environment',
+    'process_development',
+    'configuration_required',
+    'unavailable',
+  ]),
   scope: z.object({
     status: z.enum(['configured', 'missing', 'invalid']),
     hosts: z.array(z.string()),
@@ -313,7 +318,7 @@ export const environmentCreate = z.object({
 export const investigationCreate = z.object({
   environment_id: id,
   title: z.string().min(1).max(255),
-  question: z.string().min(1),
+  question: z.string().min(1).max(10_000),
   severity: severity.nullable().optional(),
 })
 

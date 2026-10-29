@@ -1,4 +1,4 @@
-import { z } from 'zod'
+import { z } from '@/lib/zod'
 
 // Response blocks, version 1: mirrors src/schemas/presentation.py. Objects are strict
 // (unknown keys rejected) and numbers must be finite, matching the backend, so a tampered

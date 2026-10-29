@@ -9,7 +9,7 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, Request, status
 
 from src.api.deps import SessionDep
-from src.auth.sessions import resolve_session
+from src.auth.sessions import record_activity, resolve_session
 from src.auth.settings import AuthNotConfigured, AuthSettings, load_auth_settings
 from src.models import AuthSession, User
 
@@ -53,14 +53,16 @@ async def require_user(
 
 
 async def require_csrf(
-    request: Request, identity: Annotated[Identity, Depends(require_user)]
+    request: Request, session: SessionDep, identity: Annotated[Identity, Depends(require_user)]
 ) -> Identity:
     """Writes need the session's CSRF token in X-CSRF-Token (the cookie alone is ambient and
-    would be sent by any site's forged request)."""
+    would be sent by any site's forged request). A write that passes is the user's own
+    action, so it moves the idle deadline (D043); reads never do."""
     if request.method not in SAFE_METHODS:
         sent = request.headers.get(CSRF_HEADER, "")
         if not sent or not secrets.compare_digest(sent, identity.session.csrf_token):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="invalid CSRF token")
+        await record_activity(session, identity.session)
     return identity
 
 

@@ -26,6 +26,7 @@ from src.models import (
     ToolCallStatus,
     TurnStatus,
 )
+from tests.credential_fixtures import allow_process_credentials
 from tests.investigators.conftest import MCP_SETTINGS, ScriptedModel
 from tests.investigators.test_main_graph import MainWorld, built_main_world
 from tests.mcp_server.conftest import connect, mcp_app, signoz, token_for  # noqa: F401
@@ -38,6 +39,7 @@ async def members(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[list[Member]
     """Owner and member of one organization, committed. Requested before any world so
     the worlds are deleted before the organization."""
     configure_auth(monkeypatch)
+    allow_process_credentials(monkeypatch)
     async with committed_members(2) as found:
         yield found
     load_auth_settings.cache_clear()

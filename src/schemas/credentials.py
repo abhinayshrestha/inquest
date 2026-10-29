@@ -1,13 +1,10 @@
-"""Planned credential configuration contracts (D026). Not routed.
+"""Credential configuration contracts (D026, D034), routed by
+src/api/routes/credentials.py and mirrored by web/src/lib/api/credentials.ts.
 
 Per-environment Nebius Token Factory and SigNoz credentials, set only by the
-environment's owner, written once and never read back. No endpoint accepts these yet:
-without authentication anyone could set or replace them, and there is no encrypted
-storage (D027). The models exist so the validation rules are fixed and tested now and
-mirrored by the frontend form schema (web/src/lib/api/credentials.ts).
-
-Secrets are SecretStr: they never appear in repr, logs or model_dump(mode="json")
-output, and responses only ever carry CredentialStatus.
+environment's owner, written and never read back: responses only ever carry
+CredentialStatus. Secrets are SecretStr: they never appear in repr, logs or
+model_dump(mode="json") output.
 """
 
 from datetime import datetime
@@ -44,11 +41,19 @@ class NebiusCredentialsInput(BaseModel):
         return _url(value, https_only=True)
 
 
+# dedicated: the organization's own SigNoz instance or Cloud workspace. provider_scoped: a
+# shared SigNoz Cloud (or self-hosted Enterprise) workspace whose key is restricted to the
+# ingestion keys an operator assigned to this organization (D037). The ingestion key ids
+# are never chosen here.
+TelemetryIsolationInput = Literal["dedicated", "provider_scoped"]
+
+
 class SigNozCredentialsInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     base_url: str
     api_key: SecretStr = Field(min_length=8, max_length=512)
+    isolation: TelemetryIsolationInput = "dedicated"
 
     @field_validator("base_url")
     @classmethod
@@ -60,7 +65,16 @@ class CredentialStatus(BaseModel):
     """The only thing ever returned about a stored credential."""
 
     kind: Literal["nebius", "signoz"]
+    # True only for "configured": stored and decryptable by this server's key ring.
     configured: bool
+    # unavailable: stored, but this server cannot decrypt it (credential storage is not
+    # configured or the row's key is not in the key ring). Fails closed, like not_configured.
+    state: Literal["not_configured", "configured", "unavailable"]
     updated_at: datetime | None
-    # A user id once users exist; never the value or a prefix of the secret.
+    # The user id of who last set it; never the value or a prefix of the secret.
     updated_by: str | None
+    # Nebius only: model ids are configuration, not secrets.
+    main_model: str | None = None
+    local_model: str | None = None
+    # SigNoz only: how the connection is isolated from other organizations (D037).
+    isolation: TelemetryIsolationInput | None = None

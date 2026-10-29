@@ -12,7 +12,7 @@ from src.schemas.environment import (
     EnvironmentRead,
     TelemetryCoverage,
 )
-from src.services import access, environments
+from src.services import access, environments, limits
 
 router = APIRouter(prefix="/environments", tags=["environments"])
 
@@ -79,10 +79,15 @@ async def create_environment(
         await access.require_member(session, data.organization_id, identity.user)
     except access.NoAccess as exc:
         raise _not_found("organization") from exc
+    await limits.hit(
+        session, "environment_create", user=identity.user.id, organization=data.organization_id
+    )
     try:
         return await environments.create_environment(
             session, data, organization_id=data.organization_id, owner_user_id=identity.user.id
         )
+    except access.NoAccess as exc:
+        raise _not_found("organization") from exc
     except environments.EnvironmentNameTaken as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="environment name already exists"

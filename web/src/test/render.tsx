@@ -34,6 +34,7 @@ export function mockFetch(handlers: Record<string, Handler>) {
   const replies: Record<string, Handler> = {
     'GET /auth/session': { body: SIGNED_IN },
     'GET /me': { body: { user: TEST_USER, memberships: [MEMBERSHIP] } },
+    'GET /transfers': { body: [] },
     ...handlers,
   }
   const calls = new Map<string, number>()

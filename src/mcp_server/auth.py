@@ -8,6 +8,8 @@ the token's organization against the assignment's rows, under a row lock on ever
 so an unexpired token for a closed or foreign assignment can run nothing.
 """
 
+import base64
+import binascii
 import logging
 import time
 import uuid
@@ -28,6 +30,12 @@ AUDIENCE = "inquest-mcp"
 INVESTIGATE_SCOPE = "inquest:investigate"
 ALGORITHM = "HS256"
 MIN_SECRET_CHARS = 32
+# Hosted deployments: the secret must be at least this many random bytes, base64-encoded
+# (`openssl rand -base64 48`), so it cannot be a guessable passphrase (audit M1).
+MIN_SECRET_BYTES = 32
+# The MCP listener is private to the process's host: investigators run in-process (D010)
+# and nothing else may reach it, so it never binds anything but loopback (D041).
+LISTEN_HOST = "127.0.0.1"
 REQUIRED_CLAIMS = ["iss", "aud", "sub", "exp", "iat", "jti", "scope", "inv", "env", "org"]
 # The "org" claim of an ownerless legacy assignment (D032): host-side tooling only.
 NO_ORGANIZATION = "legacy"
@@ -45,8 +53,14 @@ class McpSettings(BaseSettings):
     token_ttl_seconds: int = Field(default=900, gt=0, le=3600)
     # Host header allowlist (DNS rebinding protection); "host:*" allows any port.
     allowed_hosts: list[str] = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
-    # Where investigator runtimes reach this server: loopback into the same backend (D010).
-    url: str = "http://127.0.0.1:8000/mcp/"
+    # The private listener's port on LISTEN_HOST; the public API listener never serves MCP.
+    port: int = Field(default=8001, ge=1, le=65535)
+
+    @property
+    def url(self) -> str:
+        """Where investigator runtimes reach this server: loopback into the same process.
+        Derived, not configured, so it cannot point at the public listener."""
+        return f"http://{LISTEN_HOST}:{self.port}/"
 
 
 class TokenConfigError(Exception):
@@ -59,6 +73,24 @@ def _secret(settings: McpSettings) -> str:
         # Names the variable, never its value.
         raise TokenConfigError(f"MCP_TOKEN_SECRET must be at least {MIN_SECRET_CHARS} characters")
     return secret
+
+
+def secret_problem(settings: McpSettings) -> str | None:
+    """Why the secret is unfit for a hosted deployment, or None. Never includes the value."""
+    secret = settings.token_secret.get_secret_value() if settings.token_secret else ""
+    if not secret:
+        return "MCP_TOKEN_SECRET is not set"
+    try:
+        raw = base64.b64decode(secret, validate=True)
+    except (binascii.Error, ValueError):
+        raw = b""
+    # Repetition or a short alphabet means it was typed, not generated.
+    if len(raw) < MIN_SECRET_BYTES or len(set(raw)) < MIN_SECRET_BYTES // 2:
+        return (
+            f"MCP_TOKEN_SECRET must be at least {MIN_SECRET_BYTES} random bytes, base64-encoded "
+            "(openssl rand -base64 48)"
+        )
+    return None
 
 
 def mint_assignment_token(

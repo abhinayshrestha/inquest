@@ -97,7 +97,7 @@ async def call(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--url", default="http://localhost:8000/mcp/")
+    parser.add_argument("--url", default="http://127.0.0.1:8001/")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("tools", help="tools/list as the assignment's investigator")

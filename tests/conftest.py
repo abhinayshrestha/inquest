@@ -3,16 +3,38 @@ import os
 # Must be set before src modules read Settings; switches the DB to POSTGRES_TEST_DB.
 os.environ["APP_ENV"] = "test"
 
+from tests.database import provision_test_database, use_test_roles  # noqa: E402
+
+# The suite runs as a least-privilege runtime role (D040).
+use_test_roles()
+provision_test_database()
+
 from collections.abc import AsyncIterator  # noqa: E402
 
 import pytest  # noqa: E402
 from httpx import AsyncClient  # noqa: E402
+from sqlalchemy import delete  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 from src.auth.settings import load_auth_settings  # noqa: E402
-from src.db.session import engine, get_session  # noqa: E402
+from src.db.session import SessionLocal, engine, get_session  # noqa: E402
 from src.main import app  # noqa: E402
+from src.models import RateLimitCounter  # noqa: E402
+from src.services import limits  # noqa: E402
 from tests.tenancy import Member, api_client, configure_auth, make_member  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+async def fresh_limits() -> AsyncIterator[None]:
+    """Every test starts with empty rate windows: the in-memory ones of this process, and
+    counters committed by tests that use the app's own sessions (all test requests come
+    from one address). Only the test database is touched."""
+    limits.reset_process_state()
+    yield
+    limits.reset_process_state()
+    limits.limit_settings.cache_clear()
+    async with SessionLocal() as s, s.begin():
+        await s.execute(delete(RateLimitCounter))
 
 
 @pytest.fixture

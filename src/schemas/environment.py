@@ -1,16 +1,41 @@
+import json
 import uuid
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.models import EnvironmentStatus, EnvironmentType
+
+# Environment configuration is small (the SigNoz scope is a few names): bounded so one
+# record cannot hold arbitrary data or nesting.
+MAX_METADATA_BYTES = 16_384
+MAX_METADATA_DEPTH = 8
+
+
+def _depth(value: Any) -> int:
+    if isinstance(value, dict):
+        return 1 + max(map(_depth, value.values()), default=0)
+    if isinstance(value, list):
+        return 1 + max(map(_depth, value), default=0)
+    return 0
 
 
 class EnvironmentCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     type: EnvironmentType
     metadata_json: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("metadata_json")
+    @classmethod
+    def _bounded(cls, value: dict[str, Any]) -> dict[str, Any]:
+        # The request body's own nesting limit (src/api/security.py) keeps this recursion
+        # shallow; this bound is the record's.
+        if _depth(value) > MAX_METADATA_DEPTH:
+            raise ValueError(f"metadata_json is nested deeper than {MAX_METADATA_DEPTH} levels")
+        if len(json.dumps(value, ensure_ascii=False).encode()) > MAX_METADATA_BYTES:
+            raise ValueError(f"metadata_json exceeds {MAX_METADATA_BYTES} bytes")
+        return value
 
 
 class EnvironmentCreateRequest(EnvironmentCreate):
@@ -91,15 +116,19 @@ class EnvironmentDetail(EnvironmentSummary):
     updated_at: datetime
     organization_id: uuid.UUID | None
     owner_user_id: uuid.UUID | None
-    # process_development: may run with the backend's development credentials (operator
-    # grant). configuration_required: cannot run investigations until 7C credentials.
-    credentials: Literal["process_development", "configuration_required"]
+    # environment: runs with its own credentials (D034). process_development: with the
+    # backend's development credentials (operator grant, permitted on this server).
+    # configuration_required: credentials missing or incomplete. unavailable: stored
+    # credentials this server cannot read or whose endpoint is no longer allowed.
+    credentials: Literal[
+        "environment", "process_development", "configuration_required", "unavailable"
+    ]
     scope: TelemetryScopeRead
     stats: EnvironmentStats
     telemetry_provider: ProviderStatus
     ai_provider: AiProviderStatus
-    # Credentials per environment, owned by the environment's creator, need users and
-    # encrypted storage (D026, D027). Until then this is always "not_available".
+    # Kept for the existing contract; credential state is in `credentials` and in
+    # GET /environments/{id}/credentials. Configuration forms arrive in 7C-4.
     per_environment_credentials: Literal["not_available"] = "not_available"
 
 

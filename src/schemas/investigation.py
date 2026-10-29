@@ -19,7 +19,8 @@ from src.schemas.environment import EnvironmentSummary
 class InvestigationCreate(BaseModel):
     environment_id: uuid.UUID
     title: str = Field(min_length=1, max_length=255)
-    question: str = Field(min_length=1)
+    # Same bound as a follow-up question.
+    question: str = Field(min_length=1, max_length=10_000)
     severity: Severity | None = None
 
 

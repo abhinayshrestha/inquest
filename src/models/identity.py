@@ -48,6 +48,37 @@ class User(UUIDPrimaryKeyMixin, Base):
     disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class UserAdmission(UUIDPrimaryKeyMixin, Base):
+    """Permission to use Inquest at all, separate from signing in (D042). Enforced only
+    under INQUEST_AUTH_ADMISSION=approval. An operator approves a provider-verified email
+    in advance (user_id empty); the first sign-in with that verified email binds the row to
+    that (issuer, subject) for good, so a later account with the same address gets nothing.
+    Accepting an invitation at sign-in creates a bound row. Withdrawal (revoked_at) blocks
+    sign-in and sessions; memberships and environment ownership are left as they are."""
+
+    __tablename__ = "user_admissions"
+    __table_args__ = (
+        CheckConstraint("email IS NOT NULL OR user_id IS NOT NULL", name="has_target"),
+        CheckConstraint("source IN ('operator', 'invitation')", name="source_known"),
+        # One live pre-approval per address waiting for its first sign-in.
+        Index(
+            "uq_user_admissions_one_pending_email",
+            "email",
+            unique=True,
+            postgresql_where=text("user_id IS NULL AND revoked_at IS NULL"),
+        ),
+    )
+
+    # Lowercased verified email the operator approved; kept after binding as a record.
+    email: Mapped[str | None] = mapped_column(String(320))
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), unique=True
+    )
+    source: Mapped[str] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class AuthSession(UUIDPrimaryKeyMixin, Base):
     """A signed-in browser. The cookie holds a random token; only its SHA-256 is stored, so
     a database read does not yield usable sessions."""
@@ -78,6 +109,9 @@ class AuthLoginState(UUIDPrimaryKeyMixin, Base):
     code_verifier: Mapped[str] = mapped_column(String(128))
     nonce: Mapped[str] = mapped_column(String(128))
     return_to: Mapped[str] = mapped_column(String(500))
+    # SHA-256 of an invitation token the sign-in was started with (D042): accepted at the
+    # callback by a verified identity that is not admitted yet. Never the token itself.
+    invitation_hash: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 

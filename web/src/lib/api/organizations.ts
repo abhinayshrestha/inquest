@@ -1,4 +1,4 @@
-import { z } from 'zod'
+import { z } from '@/lib/zod'
 
 import { request, API_BASE } from './client'
 
@@ -86,6 +86,11 @@ const enc = encodeURIComponent
 
 export const getSession = () => request('/auth/session', sessionInfo)
 export const logout = () => request('/auth/logout', z.null(), { method: 'POST' })
+// Ends every session of the signed-in user, this one included (D043).
+export const logoutEverywhere = () =>
+  request('/auth/logout-everywhere', z.null(), { method: 'POST' })
+// Real user input: the only reads-free way the idle deadline moves (D043).
+export const recordActivity = () => request('/auth/activity', z.null(), { method: 'POST' })
 export const getMe = () => request('/me', me)
 export const createOrganization = (name: string) =>
   request('/organizations', organization, { method: 'POST', json: { name } })
@@ -114,6 +119,17 @@ export const revokeInvitation = (orgId: string, invitationId: string) =>
 export const acceptInvitation = (token: string) =>
   request('/invitations/accept', membership, { method: 'POST', json: { token } })
 
+const signInStart = z.object({ authorization_url: z.url({ protocol: /^https?$/ }) })
+
+// Sign-in from an invitation link (D042): the token goes in the request body, never in a
+// URL. If the provider-verified identity is not yet allowed to use Inquest, the backend
+// admits it by accepting this invitation when the provider sends the browser back.
+export const startInvitationSignIn = (invitationToken: string, returnTo: string) =>
+  request('/auth/login', signInStart, {
+    method: 'POST',
+    json: { invitation_token: invitationToken, return_to: returnTo },
+  })
+
 // A full-page navigation: the backend redirects to the provider and back.
 export function signInUrl(returnTo = '/') {
   return `${API_BASE}/auth/login?return_to=${enc(returnTo)}`
@@ -121,8 +137,7 @@ export function signInUrl(returnTo = '/') {
 
 // Organization administration and environment ownership are separate: owners and admins
 // manage people, while only an environment's owner sets its credentials (D029).
-// `enforced` marks what the server checks today; the rest needs environment ownership
-// (Phase 7B/7C).
+// `enforced` marks what the server checks today (all of it since Phase 7C-3).
 export type Permission = {
   action: string
   owner: boolean
@@ -138,15 +153,7 @@ export const PERMISSIONS: readonly Permission[] = [
   { action: 'Invite admins', owner: true, admin: false, member: false, environmentOwner: false, enforced: true },
   { action: 'Remove members', owner: true, admin: true, member: false, environmentOwner: false, enforced: true },
   { action: 'Change roles', owner: true, admin: false, member: false, environmentOwner: false, enforced: true },
-  { action: 'Create environments (creator becomes owner)', owner: true, admin: true, member: true, environmentOwner: true, enforced: false },
-  { action: "Set an environment's Nebius and telemetry credentials", owner: false, admin: false, member: false, environmentOwner: true, enforced: false },
-  { action: 'Transfer environment ownership', owner: false, admin: false, member: false, environmentOwner: true, enforced: false },
+  { action: 'Create environments (creator becomes owner)', owner: true, admin: true, member: true, environmentOwner: true, enforced: true },
+  { action: "Set an environment's Nebius and telemetry credentials", owner: false, admin: false, member: false, environmentOwner: true, enforced: true },
+  { action: 'Transfer environment ownership', owner: false, admin: false, member: false, environmentOwner: true, enforced: true },
 ] // prettier-ignore
-
-// Planned explicit environment ownership transfer (Phase 7, approved rule).
-export const PLANNED_TRANSFER_STEPS = [
-  'The current owner proposes a member of the same organization as the new owner.',
-  'The proposed owner accepts or declines; nothing changes until they accept.',
-  "On acceptance, ownership moves and the previous owner's credentials are removed or revoked; investigations of the environment wait until the new owner sets their own.",
-  'Investigation history (investigations, evidence, reports) stays with the environment.',
-] as const

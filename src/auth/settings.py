@@ -1,8 +1,11 @@
 from functools import lru_cache
+from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import Field, SecretStr, ValidationError
+from pydantic import Field, SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from src.config import get_settings
 
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
@@ -32,6 +35,15 @@ class AuthSettings(BaseSettings):
     idle_minutes: int = Field(default=120, ge=5, le=1440)
     # Only for plain-http local development; refused for any other public_url.
     cookie_secure: bool = True
+    # Who may use Inquest after signing in (D042). "approval": operator-approved users and
+    # invited teammates only; required when hosted. "open": every verified sign-in, the
+    # default only for local development and tests. Resolved by load_auth_settings.
+    admission: Literal["open", "approval"] | None = None
+
+    @field_validator("admission", mode="before")
+    @classmethod
+    def _empty_is_unset(cls, value: object) -> object:
+        return value or None  # .env.example leaves it empty
 
     @property
     def origin(self) -> str:
@@ -64,7 +76,13 @@ def load_auth_settings() -> AuthSettings:
         raise AuthNotConfigured("INQUEST_AUTH_COOKIE_SECURE=false is only allowed for localhost")
     if not settings.callback_path.startswith("/"):
         raise AuthNotConfigured("INQUEST_AUTH_CALLBACK_PATH must start with /")
-    return settings
+    # Unrestricted sign-up is never what a hosted server gets by omission.
+    hosted = get_settings().app_env == "production"
+    if settings.admission is None and hosted:
+        raise AuthNotConfigured("INQUEST_AUTH_ADMISSION must be set to approval when hosted")
+    if settings.admission == "open" and hosted:
+        raise AuthNotConfigured("INQUEST_AUTH_ADMISSION=open is not allowed when hosted")
+    return settings.model_copy(update={"admission": settings.admission or "open"})
 
 
 def get_auth_settings() -> AuthSettings:

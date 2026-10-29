@@ -5,9 +5,10 @@
 
 The model reasons and chooses queries; deterministic code here decides what runs, enforces
 budgets, validates every structured answer against the database and persists the result.
-Checkpoint state holds messages, counters and validated drafts only. The MCP client and
-the model live in the run's context, which is never checkpointed, so no token can reach a
-checkpoint. Thread: asg:{assignment_id}.
+Checkpoint state holds messages, counters and validated drafts only. The MCP client lives
+in the run's context, which is never checkpointed, so no token can reach a checkpoint; the
+model is built per step from this assignment's environment credentials (provider, D034),
+never inherited from Main. Thread: asg:{assignment_id}.
 """
 
 import asyncio
@@ -30,11 +31,13 @@ from langgraph.graph.message import add_messages
 from langgraph.runtime import Runtime
 from mcp import Client
 
+from src.credentials import resolver
+from src.credentials.resolver import CredentialRefused
 from src.db.session import SessionLocal
 from src.investigators import context, lifecycle, policy, prompts, records
 from src.investigators.checkpoint import thread_id
-from src.investigators.llm import local_model
 from src.investigators.mcp_tools import McpCallError, call_tool, connect, tool_specs
+from src.investigators.provider import environment_model
 from src.investigators.refs import ref
 from src.investigators.schemas import Conclusion, HypothesisPlan
 from src.investigators.structured import audit_line, structured_call, tokens_of
@@ -54,7 +57,6 @@ from src.models import (
     AssignmentStatus,
     InvestigationAssignment,
     InvestigationStatus,
-    can_use_process_credentials,
 )
 from src.models.evidence import MAX_SUMMARY_CHARS
 from src.services.investigations import finish_assignment
@@ -78,9 +80,15 @@ ARGS_PREVIEW_CHARS = 200
 
 @dataclass
 class LocalContext:
-    model: BaseChatModel
     mcp: Client
     tools: list[dict[str, Any]]
+    environment_id: uuid.UUID
+    # Tests and host scripts only; otherwise built per step from the environment.
+    model: BaseChatModel | None = None
+
+
+def _model(runtime: Runtime[LocalContext]):
+    return environment_model(runtime.context.environment_id, runtime.context.model)
 
 
 class LocalState(TypedDict, total=False):
@@ -299,13 +307,16 @@ async def hypothesize(state: LocalState, runtime: Runtime[LocalContext]) -> dict
     # Names in hypotheses must come from what the model was shown.
     grounding = "\n".join(str(m.content) for m in state["messages"])
     try:
-        drafts, problems, calls, tokens, first = await structured_call(
-            runtime.context.model,
-            HypothesisPlan,
-            [*state["messages"], HumanMessage(prompts.HYPOTHESIZE)],
-            lambda plan: validate_plan(plan, grounding),
-            calls_left,
-        )
+        async with _model(runtime) as model:
+            drafts, problems, calls, tokens, first = await structured_call(
+                model,
+                HypothesisPlan,
+                [*state["messages"], HumanMessage(prompts.HYPOTHESIZE)],
+                lambda plan: validate_plan(plan, grounding),
+                calls_left,
+            )
+    except CredentialRefused:
+        raise
     except Exception as exc:
         # Investigate without hypotheses rather than fail; the agent still has the objective.
         logger.warning("hypothesize model call failed: %s", type(exc).__name__)
@@ -349,9 +360,12 @@ async def agent(state: LocalState, runtime: Runtime[LocalContext]) -> dict[str, 
         if stop.startswith("budget:") and state.get("stop_reason") is None:
             await _emit(state, [("budget.exhausted", {"scope": "local", "reason": stop})])
         return {"stop_reason": stop}
-    model = runtime.context.model.bind_tools(runtime.context.tools)
     try:
-        reply = await model.ainvoke(context.model_view(state["messages"]))
+        async with _model(runtime) as model:
+            bound = model.bind_tools(runtime.context.tools)
+            reply = await bound.ainvoke(context.model_view(state["messages"]))
+    except CredentialRefused:
+        raise
     except Exception as exc:
         logger.warning("agent model call failed: %s", type(exc).__name__)
         return {"stop_reason": "model_error", "model_calls": state["model_calls"] + 1}
@@ -553,17 +567,20 @@ async def conclude(state: LocalState, runtime: Runtime[LocalContext]) -> dict[st
         clean, calls, tokens, first = None, 0, 0, problems
     else:
         try:
-            clean, problems, calls, tokens, first = await structured_call(
-                runtime.context.model,
-                Conclusion,
-                [SystemMessage(prompts.LOCAL_SYSTEM), HumanMessage(prompt)],
-                lambda c: validate_conclusion(c, known),
-                calls_left,
-                # Only a draft that will really loop is discarded, and so not repaired.
-                skip_repair=lambda c: (
-                    may_continue and c.verdict == "need_more" and bool(pursuable(c.gaps))
-                ),
-            )
+            async with _model(runtime) as model:
+                clean, problems, calls, tokens, first = await structured_call(
+                    model,
+                    Conclusion,
+                    [SystemMessage(prompts.LOCAL_SYSTEM), HumanMessage(prompt)],
+                    lambda c: validate_conclusion(c, known),
+                    calls_left,
+                    # Only a draft that will really loop is discarded, and so not repaired.
+                    skip_repair=lambda c: (
+                        may_continue and c.verdict == "need_more" and bool(pursuable(c.gaps))
+                    ),
+                )
+        except CredentialRefused:
+            raise
         except Exception as exc:
             logger.warning("conclude model call failed: %s", type(exc).__name__)
             problems = [f"[model_error] conclude failed: {type(exc).__name__}"]
@@ -737,18 +754,19 @@ async def run_local_investigator(
         if assignment.status != AssignmentStatus.RUNNING:
             raise AssignmentNotRunning(f"assignment {assignment_id} is {assignment.status}")
         # Checked before any model call or MCP token: the token's tenant comes from these
-        # rows, and process-wide credentials serve only environments allowed them (D033).
-        refusal = (
-            "scope_mismatch"
-            if investigation.organization_id != environment.organization_id
-            else None
-            if can_use_process_credentials(environment)
-            else "configuration_required"
-        )
+        # rows, and the environment must have usable credentials of its own (D033, D034).
+        refusal = None
+        if investigation.organization_id != environment.organization_id:
+            refusal = "scope_mismatch"
+        else:
+            try:
+                async with SessionLocal() as s:
+                    await resolver.environment_credentials(s, environment)
+            except CredentialRefused as refused:
+                refusal = refused.code
         if refusal is not None:
             await _finish(assignment_id, AssignmentStatus.FAILED)
             raise AssignmentNotRunning(f"assignment {assignment_id} refused: {refusal}")
-        model = model or local_model()
         mcp_settings = mcp_settings or McpSettings()
         started = assignment.started_at or datetime.now(UTC)
         remaining = (
@@ -767,7 +785,12 @@ async def run_local_investigator(
                     transport=mcp_transport,
                 ) as client,
             ):
-                run_context = LocalContext(model=model, mcp=client, tools=await tool_specs(client))
+                run_context = LocalContext(
+                    mcp=client,
+                    tools=await tool_specs(client),
+                    environment_id=environment.id,
+                    model=model,
+                )
                 await graph.ainvoke(
                     None if resumed else {"assignment_id": str(assignment_id)},
                     config,
@@ -784,6 +807,10 @@ async def run_local_investigator(
             if not lifecycle.shutting_down():
                 await asyncio.shield(_finish(assignment_id, AssignmentStatus.CANCELLED))
             raise
+        except CredentialRefused as refused:
+            # Credentials removed or made unusable mid-run: no further provider call.
+            logger.warning("local investigator %s refused: %s", assignment_id, refused.code)
+            status = AssignmentStatus.FAILED
         except Exception:
             # Exception text may carry provider or database details; log it, don't return it.
             logger.exception("local investigator %s failed", assignment_id)

@@ -139,6 +139,19 @@ describe('access ending while signed in', () => {
   })
 })
 
+function credentialReads(stored: boolean) {
+  const status = (kind: string) => ({
+    kind, configured: stored, state: stored ? 'configured' : 'not_configured',
+    updated_at: stored ? '2026-10-26T10:00:00Z' : null, updated_by: stored ? TEST_USER.id : null,
+    main_model: stored && kind === 'nebius' ? 'nvidia/main' : null, local_model: null,
+    isolation: stored && kind === 'signoz' ? 'dedicated' : null,
+  }) // prettier-ignore
+  return {
+    [`GET /environments/${ENV.id}/credentials`]: { body: [status('nebius'), status('signoz')] },
+    [`GET /organizations/${ORGANIZATION_ID}/members`]: { body: [] },
+  }
+}
+
 describe('environments of an organization', () => {
   it('creates one in the selected organization, owned by the caller', async () => {
     const created = {
@@ -176,7 +189,7 @@ describe('environments of an organization', () => {
     const provider = {
       source: 'environment',
       configured: false,
-      issues: ['per-environment credentials (not available until Phase 7C)'],
+      issues: ['configuration_required'],
     }
     mockFetch({
       [`GET /environments/${ENV.id}`]: {
@@ -192,12 +205,52 @@ describe('environments of an organization', () => {
         },
       },
       'GET /investigations': { body: { items: [], next_offset: null } },
+      ...credentialReads(false),
     }) // prettier-ignore
     renderRoute(`/environments/${ENV.id}?tab=ai`)
     const header = await screen.findByRole('heading', { name: ENV.name })
     expect(
       within(header.parentElement!.parentElement!).getByText('Configuration required'),
     ).toBeInTheDocument()
-    expect(screen.getByText(/development credentials are never shared with it/)).toBeInTheDocument()
+    expect(
+      await screen.findByText(/development settings are never shared with it/),
+    ).toBeInTheDocument()
   })
+
+  it.each([
+    ['environment', true, [], null],
+    ['unavailable', false, ['credentials_unavailable'], 'Credentials unavailable'],
+  ] as const)(
+    'shows own credentials in state %s without any value',
+    async (credentials, configured, issues, badge) => {
+      const provider = { source: 'environment', configured, issues: [...issues] }
+      mockFetch({
+        [`GET /environments/${ENV.id}`]: {
+          body: {
+            ...ENV, organization_id: ORGANIZATION_ID, owner_user_id: TEST_USER.id,
+            credentials, created_at: '2026-10-26T10:00:00Z', updated_at: '2026-10-26T10:00:00Z',
+            scope: { status: 'missing', hosts: [], services: [], deployment_environment: null, problems: [] },
+            stats: { investigations: 0, active_investigations: 0, evidence: 0, tool_calls: 0, last_investigation_at: null },
+            telemetry_provider: { provider: 'signoz', ...provider },
+            ai_provider: { provider: 'nebius_token_factory', ...provider,
+                           main_model: configured ? 'nvidia/main' : null, local_model: null },
+            per_environment_credentials: 'not_available',
+          },
+        },
+        'GET /investigations': { body: { items: [], next_offset: null } },
+        ...credentialReads(true),
+      }) // prettier-ignore
+      renderRoute(`/environments/${ENV.id}?tab=ai`)
+      const header = await screen.findByRole('heading', { name: ENV.name })
+      const badges = within(header.parentElement!.parentElement!)
+      expect(badges.queryByText('Configuration required')).not.toBeInTheDocument()
+      if (badge) {
+        expect(badges.getByText(badge)).toBeInTheDocument()
+        expect(await screen.findByText(/Stored but unreadable/)).toBeInTheDocument()
+      } else {
+        expect(await screen.findByText('nvidia/main')).toBeInTheDocument()
+        expect(screen.queryByText(/Configuration required:/)).not.toBeInTheDocument()
+      }
+    },
+  )
 })

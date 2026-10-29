@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
-import { credentialStatus, nebiusCredentialsInput, signozCredentialsInput } from './credentials'
+import {
+  credentialStatus,
+  nebiusCredentialsInput,
+  signozCredentialsInput,
+  VALIDATION_MESSAGES,
+} from './credentials'
 
 // Mirrors tests/test_environments_api.py: the frontend and backend contracts agree.
 const NEBIUS = { api_key: 'x'.repeat(32), main_model: 'nvidia/main', local_model: 'nvidia/local' }
@@ -37,8 +42,33 @@ describe('credential contract', () => {
   })
 
   it('describes stored credentials without any secret field', () => {
-    const status = { kind: 'nebius', configured: true, updated_at: null, updated_by: null }
+    const status = {
+      kind: 'nebius',
+      configured: true,
+      state: 'configured',
+      updated_at: null,
+      updated_by: null,
+      main_model: 'nvidia/main',
+      local_model: 'nvidia/local',
+      isolation: null,
+    }
     expect(credentialStatus.parse(status)).toEqual(status)
     expect(credentialStatus.safeParse({ ...status, api_key: 'sk-x' }).success).toBe(false)
+    expect(credentialStatus.safeParse({ ...status, base_url: 'https://x' }).success).toBe(false)
+    expect(credentialStatus.safeParse({ ...status, state: 'expired' }).success).toBe(false)
+  })
+
+  it('explains every validation code the backend sends (src/credentials/validation.py)', () => {
+    expect(Object.keys(VALIDATION_MESSAGES).sort()).toEqual([
+      'auth_failed',
+      'connection_not_isolated',
+      'dedication_unverified',
+      'destination_not_allowed',
+      'model_not_found',
+      'provider_error',
+      'scope_not_enforced',
+      'tenant_keys_missing',
+      'unreachable',
+    ])
   })
 })

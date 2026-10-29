@@ -34,6 +34,7 @@ from src.models import (
     TriggerType,
 )
 from src.services import access, adoption
+from tests.credential_fixtures import allow_process_credentials
 from tests.records import add_assignment
 from tests.tenancy import Member, api_client, configure_auth, make_member
 
@@ -272,7 +273,7 @@ async def test_ownerless_legacy_records_are_quarantined(tenants: Tenants):
 
 
 async def test_tenant_environments_never_run_on_process_credentials(
-    tenants: Tenants, session: AsyncSession
+    tenants: Tenants, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ):
     t = tenants
     url = f"/investigations/{t.a.investigation_id}/start"
@@ -283,12 +284,17 @@ async def test_tenant_environments_never_run_on_process_credentials(
             f"/investigations/{t.a.investigation_id}/turns", json={"question": "x"}
         )
         assert follow_up.status_code == 409
-        # Only an operator grant changes that; then the (disabled) runner is the limit.
+        # Only an operator grant changes that, where the server permits grants; then the
+        # (disabled) runner is the limit.
         await session.execute(
             update(Environment)
             .where(Environment.id == t.a.environment_id)
             .values(process_credentials=True)
         )
+        refused = await ada.post(url)
+        assert refused.status_code == 409
+        assert "process credentials not permitted" in refused.json()["detail"]
+        allow_process_credentials(monkeypatch)
         assert (await ada.post(url)).status_code == 503
 
 

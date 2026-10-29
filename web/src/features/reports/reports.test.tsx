@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   ENV,
@@ -173,7 +173,15 @@ describe('reports explorer', () => {
 })
 
 describe('report view', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
   it('shows outcome, context and that the report is a record, not live telemetry', async () => {
+    // The age shown is relative to now: pin now, 15 hours after the observation (only
+    // Date is faked, so the queries' own timers keep running).
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-22T08:48:00Z'))
     backend()
     renderRoute(`${BASE}/reports/2`)
     expect(await screen.findByRole('heading', { level: 1, name: 'Report v2' })).toBeInTheDocument()
@@ -182,7 +190,7 @@ describe('report view', () => {
     expect(screen.getAllByText('Inconclusive')).toHaveLength(2)
     expect(screen.getByText('Latest version')).toBeInTheDocument()
     expect(screen.getByText(/A record, not live telemetry/)).toHaveTextContent(
-      /observed up to Oct 21, 17:48 UTC \(.+ ago\)/,
+      /observed up to Oct 21, 17:48 UTC \(15 hours ago\)/,
     )
   })
 

@@ -1,0 +1,57 @@
+# Local security validation of deploy/compose.yaml (run.sh; docs/deployment.md). Adds a
+# mock OIDC provider behind the same proxy, a simulated external network with two
+# clients, and the test CA. Nothing here is for production.
+services:
+  proxy:
+    networks:
+      edge:
+        ipv4_address: 172.30.30.2
+        aliases: [inquest.test, oidc.test]
+      oidc: {}
+    depends_on: [oidc]
+    volumes:
+      - ./e2e/oidc.conf.template:/etc/nginx/templates/oidc.conf.template:ro
+
+  app:
+    environment:
+      # The provider's certificate comes from the test CA (sign-in only; providers
+      # reached through the credential network policy ignore this variable).
+      SSL_CERT_FILE: /run/inquest/test-ca.pem
+    # The provider is reached through the proxy on the private app network.
+    extra_hosts: ["oidc.test:172.30.10.2"]
+    volumes:
+      - ${INQUEST_SECRETS_DIR}/postgres/ca.pem:/run/inquest/test-ca.pem:ro
+      - ./e2e:/e2e:ro
+
+  oidc:
+    image: ghcr.io/navikt/mock-oauth2-server:2.1.10
+    # Interactive: each sign-in posts a username (the subject) and claims, so the checks
+    # can be several identities (approved, invited, unknown, unverified).
+    environment:
+      JSON_CONFIG: '{"interactiveLogin": true, "httpServer": "NettyWrapper"}'
+    networks: [oidc]
+
+  # The simulated internet: two clients with distinct addresses on the edge network.
+  client-a: &client
+    image: inquest-app
+    profiles: [e2e]
+    read_only: true
+    environment: { CLIENT_NAME: a }
+    entrypoint: ["python", "/e2e/probe.py"]
+    volumes:
+      - ./e2e:/e2e:ro
+      - ${INQUEST_SECRETS_DIR}/postgres/ca.pem:/run/test-ca.pem:ro
+    networks:
+      edge: { ipv4_address: 172.30.30.10 }
+
+  client-b:
+    <<: *client
+    environment: { CLIENT_NAME: b }
+    networks:
+      edge: { ipv4_address: 172.30.30.11 }
+
+networks:
+  edge:
+    ipam: { config: [{ subnet: 172.30.30.0/24, ip_range: 172.30.30.128/25 }] }
+  oidc:
+    internal: true

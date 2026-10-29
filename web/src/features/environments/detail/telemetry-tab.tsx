@@ -10,7 +10,7 @@ import { formatDateTime, humanize } from '@/lib/format'
 import { formatWindow } from '@/lib/render/blocks/format'
 
 import { useTelemetryCoverage } from '../use-environments'
-import { CredentialForm } from './credential-form'
+import { CredentialSection, Readiness } from './credential-section'
 import { PROVIDER_SOURCE } from './provider-source'
 import { ConfiguredBadge, Facts, Notice, Section } from './sections'
 
@@ -176,39 +176,35 @@ export function TelemetryTab({ environment }: { environment: EnvironmentDetail }
     <div className="space-y-4">
       <ScopeSection environment={environment} />
       <CoverageSection environmentId={environment.id} />
-      <Section
-        title="SigNoz connection"
-        badge={<ConfiguredBadge configured={provider.configured} />}
-        description="Telemetry storage and queries (metrics, logs, traces)."
+      <CredentialSection
+        environment={environment}
+        kind="signoz"
+        description="The SigNoz URL and API key this environment's investigations query telemetry with (metrics, logs, traces). Encrypted on the server; the URL and key are never shown again."
+        facts={[['URL and API key', 'Never shown or sent to the browser']]}
       >
-        <div className="space-y-3">
-          <Facts
-            items={[
-              ['Source', PROVIDER_SOURCE[provider.source]],
-              ['Credentials', 'Never shown or sent to the browser'],
-            ]}
-          />
-          {provider.source === 'environment' ? (
-            <Notice tone="warning">
-              Configuration required. This environment has no telemetry connection of its own, and
-              the backend&apos;s development connection is never shared with it; its investigations
-              cannot query telemetry yet.
-            </Notice>
-          ) : (
-            provider.issues.length > 0 && (
+        <Readiness environment={environment} />
+        <Notice>
+          &ldquo;Configured&rdquo; means a connection is saved and this server can use it, not that
+          SigNoz is reachable right now. Reachability shows up in the recorded availability above.
+        </Notice>
+      </CredentialSection>
+      {environment.credentials === 'process_development' && (
+        <Section
+          title="Development settings"
+          badge={<ConfiguredBadge configured={provider.configured} />}
+          description={PROVIDER_SOURCE.process_environment}
+        >
+          <div className="space-y-3">
+            <Facts items={[['Source', PROVIDER_SOURCE[provider.source]]]} />
+            {provider.issues.length > 0 && (
               <Notice tone="warning">
                 Missing or invalid settings: {provider.issues.join(', ')}. Telemetry queries fail
                 until they are set in the backend&apos;s .env.
               </Notice>
-            )
-          )}
-          <Notice>
-            &ldquo;Configured&rdquo; means the settings are present and well-formed, not that SigNoz
-            was reachable. Reachability shows up in the recorded availability above.
-          </Notice>
-        </div>
-      </Section>
-      <CredentialForm kind="signoz" />
+            )}
+          </div>
+        </Section>
+      )}
     </div>
   )
 }

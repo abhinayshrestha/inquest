@@ -45,12 +45,19 @@ const coverage = {
   queries_failed: 1,
 } // prettier-ignore
 
+const NO_CREDENTIALS = ['nebius', 'signoz'].map((kind) => ({
+  kind, configured: false, state: 'not_configured', updated_at: null, updated_by: null,
+  main_model: null, local_model: null, isolation: null,
+})) // prettier-ignore
+
 function backend(extra: Record<string, Reply | Reply[]> = {}) {
   return mockFetch({
     [`GET ${PATH}`]: { body: detail },
     [`GET ${PATH}/telemetry`]: { body: coverage },
     'GET /environments': { body: [ENV_ITEM] },
     'GET /investigations': { body: { items: [listItem], next_offset: null } },
+    [`GET ${PATH}/credentials`]: { body: NO_CREDENTIALS },
+    [`GET /organizations/${ORGANIZATION_ID}/members`]: { body: [] },
     ...extra,
   })
 }
@@ -126,33 +133,17 @@ describe('environments', () => {
     backend()
     renderRoute(`${PATH}?tab=ai`)
     expect(await screen.findByText('nvidia/Nemotron-3-Ultra-550b-a55b')).toBeInTheDocument()
-    expect(screen.getByText('Not configured')).toBeInTheDocument()
+    expect(await screen.findByText('Not configured')).toBeInTheDocument()
     expect(screen.getByText(/Missing or invalid settings: NEBIUS_LOCAL_MODEL/)).toBeInTheDocument()
     expect(screen.getAllByText(/development settings/).length).toBeGreaterThan(0)
   })
 
-  it('renders credential forms disabled so nothing can be entered or sent', async () => {
-    const fetchMock = backend()
-    renderRoute(`${PATH}?tab=ai`)
-    const form = await screen.findByRole('form', { name: 'Per-environment Nebius credentials' })
-    const key = within(form).getByLabelText('API key')
-    expect(key).toBeDisabled()
-    expect(key).toHaveAttribute('type', 'password')
-    await userEvent.type(key, 'sk-should-not-be-accepted')
-    expect(key).toHaveValue('')
-    expect(within(form).getByRole('button', { name: /save credentials/i })).toBeDisabled()
-    // Only reads ever reach the backend from this page, and nothing lands in storage.
-    expect(fetchMock.mock.calls.every(([, init]) => (init?.method ?? 'GET') === 'GET')).toBe(true)
-    expect(Object.keys(window.localStorage).filter((k) => !k.startsWith('inquest.'))).toEqual([])
-  })
-
-  it('shows the recorded owner and transfer as unavailable', async () => {
+  it('shows the owner and, with nobody to hand it to, says so', async () => {
     backend()
     renderRoute(`${PATH}?tab=settings`)
     // The fixture's owner is the signed-in test user.
     expect(await screen.findByText('you')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /transfer ownership/i })).toBeDisabled()
-    expect(screen.getByText(/previous owner's credentials are removed/)).toBeInTheDocument()
+    expect(await screen.findByText(/No other members to transfer it to/)).toBeInTheDocument()
   })
 
   it('handles unknown environments and retries failures', async () => {

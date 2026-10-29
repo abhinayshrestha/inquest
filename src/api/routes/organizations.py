@@ -20,6 +20,7 @@ from src.schemas.identity import (
     RoleUpdate,
     UserRead,
 )
+from src.services import limits
 from src.services import organizations as orgs
 
 router = APIRouter(tags=["organizations"])
@@ -67,6 +68,7 @@ async def me(session: SessionDep, identity: CurrentUser) -> MeRead:
 async def create_organization(
     data: OrganizationCreate, session: SessionDep, identity: WritingUser
 ) -> OrganizationRead:
+    await limits.hit(session, "organization_create", user=identity.user.id)
     try:
         o = await orgs.create_organization(session, identity.user, data.name)
     except ERRORS as exc:
@@ -159,6 +161,11 @@ async def create_invitation(
     organization_id: uuid.UUID, data: InvitationCreate, session: SessionDep, identity: WritingUser
 ) -> InvitationCreated:
     try:
+        # Only someone who may invite counts against the organization's budget.
+        await orgs.require_role(session, organization_id, identity.user, orgs.MANAGERS)
+        await limits.hit(
+            session, "invitation_create", user=identity.user.id, organization=organization_id
+        )
         invitation, token = await orgs.create_invitation(
             session, organization_id, identity.user, str(data.email), data.role
         )
@@ -189,6 +196,7 @@ async def revoke_invitation(
 async def accept_invitation(
     data: InvitationAccept, session: SessionDep, identity: WritingUser
 ) -> MembershipRead:
+    await limits.hit(session, "invitation_accept", user=identity.user.id)
     try:
         o = await orgs.accept_invitation(session, identity.user, data.token)
     except ERRORS as exc:

@@ -10,6 +10,12 @@ Lifecycle per call:
 
 Phases 1 and 3 run to completion even if the caller is cancelled, so no row is left
 half-written by a cancellation; the caller's CancelledError is re-raised afterwards.
+
+Credentials (D034) are resolved in phase 1 under the assignment row lock, from the
+assignment's own environment, before idempotent replay. Environment credentials are
+decrypted for this call only and sent through the destination-guarded client; the
+`signoz_settings`/`http_client` arguments (tests, host tooling) apply only to the
+process-wide connection and can never redirect an environment's own one.
 """
 
 import asyncio
@@ -26,6 +32,9 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.credentials import resolver
+from src.credentials.network import DestinationNotAllowed, guarded_client
+from src.credentials.resolver import CredentialRefused, Credentials
 from src.db.session import SessionLocal
 from src.integrations.signoz import (
     SigNozError,
@@ -33,6 +42,7 @@ from src.integrations.signoz import (
     SigNozSettings,
     load_signoz_settings,
 )
+from src.integrations.signoz.client import CONNECT_TIMEOUT_SECONDS
 from src.integrations.signoz.normalize import json_size
 from src.integrations.signoz.schemas import Scope, SigNozResult
 from src.models import (
@@ -46,7 +56,6 @@ from src.models import (
     ToolCall,
     ToolCallStatus,
     ToolCategory,
-    can_use_process_credentials,
 )
 from src.models.evidence import MAX_DATA_JSON_BYTES
 from src.models.evidence import MAX_SUMMARY_CHARS as MAX_EVIDENCE_SUMMARY_CHARS
@@ -78,10 +87,31 @@ SCOPE_WARNINGS = {
 
 
 @dataclass
+class _Connection:
+    """Where this call's queries go. Holds a decrypted key: never logged or stored."""
+
+    settings: SigNozSettings | None
+    error: SigNozError | None
+    # Set for an environment's own connection: the destination policy to enforce.
+    guarded: Credentials | None = None
+
+    @property
+    def secrets(self) -> list[str]:
+        if self.guarded is not None:
+            keys = self.guarded.secrets()
+        elif self.settings is not None:
+            keys = [self.settings.api_key.get_secret_value()]
+        else:
+            keys = []
+        return [k for k in keys if len(k) >= MIN_SECRET_CHARS]
+
+
+@dataclass
 class _Admitted:
     tool_call_id: uuid.UUID
     assignment_id: uuid.UUID
     scope: Scope
+    connection: _Connection = field(repr=False)
 
 
 @dataclass
@@ -121,22 +151,33 @@ async def _uncancellable[T](coro: Coroutine[Any, Any, T]) -> tuple[T, bool]:
             cancelled = True
 
 
-def _load_settings(
-    settings: SigNozSettings | None,
-) -> tuple[SigNozSettings | None, SigNozError | None]:
-    if settings is not None:
-        return settings, None
+def _connection(credentials: Credentials, override: SigNozSettings | None) -> _Connection:
+    if credentials.source == "environment":
+        own = credentials.signoz
+        return _Connection(
+            SigNozSettings(
+                base_url=own["base_url"],
+                api_key=own["api_key"],  # type: ignore[arg-type]
+                # Provider-scoped: every query restricted to the organization's keys (D037).
+                tenant_key_ids=credentials.tenant_key_ids,
+            ),
+            None,
+            guarded=credentials,
+        )
+    if override is not None:
+        return _Connection(override, None)
     try:
-        return load_signoz_settings(), None
+        return _Connection(load_signoz_settings(), None)
     except SigNozError as exc:
-        return None, exc
+        return _Connection(None, exc)
 
 
-def _secrets(settings: SigNozSettings | None) -> list[str]:
-    if settings is None:
-        return []
-    key = settings.api_key.get_secret_value()
-    return [key] if len(key) >= MIN_SECRET_CHARS else []
+# Credential refusals as executor codes; configuration_required keeps its 7B name.
+REFUSAL_CODES = {"configuration_required": "policy.credentials_not_configured"}
+DESTINATION_REFUSED = ToolError(
+    code="policy.destination_not_allowed",
+    message="the telemetry endpoint is outside this server's destination policy",
+)
 
 
 def _validate(spec: ToolSpec | None, arguments: Any) -> tuple[BaseModel | None, str | None]:
@@ -159,13 +200,11 @@ async def execute_tool(
 ) -> ToolExecutionResult:
     """Runs one tool call for an assignment. Tool-level failures come back as a result,
     never as an exception; only the caller's own cancellation is raised."""
-    settings, settings_error = _load_settings(signoz_settings)
-    secrets = _secrets(settings)
     spec = TOOLS.get(tool_name)
     req, invalid = _validate(spec, arguments)
 
     admitted, cancelled = await _uncancellable(
-        _admit(session_factory, tool_name, spec, req, invalid, arguments, context, secrets)
+        _admit(session_factory, tool_name, spec, req, invalid, arguments, context, signoz_settings)
     )
     if isinstance(admitted, ToolExecutionResult):
         if cancelled:
@@ -173,19 +212,20 @@ async def execute_tool(
         return admitted
     assert spec is not None and req is not None
 
+    connection = admitted.connection
     started = time.monotonic()
     if cancelled:
         run = _Run(ToolCallStatus.CANCELLED, error=CANCELLED)
     else:
         try:
-            run = await _run(spec, req, admitted.scope, settings, settings_error, http_client)
+            run = await _guarded_run(spec, req, admitted.scope, connection, http_client)
         except asyncio.CancelledError:
             run = _Run(ToolCallStatus.CANCELLED, error=CANCELLED)
             cancelled = True
     run.duration_ms = _ms(started)
 
     result, cancelled_late = await _uncancellable(
-        _finalize(session_factory, admitted, spec, req, run, secrets)
+        _finalize(session_factory, admitted, spec, req, run, connection.secrets)
     )
     if cancelled or cancelled_late:
         raise asyncio.CancelledError
@@ -203,13 +243,13 @@ async def _admit(
     invalid: str | None,
     arguments: Any,
     context: ExecutionContext,
-    secrets: list[str],
+    signoz_settings: SigNozSettings | None,
 ) -> ToolExecutionResult | _Admitted:
     try:
         async with asyncio.timeout(policy.DB_TIMEOUT_SECONDS):
             async with session_factory() as session, session.begin():
                 return await _admit_in(
-                    session, tool_name, spec, req, invalid, arguments, context, secrets
+                    session, tool_name, spec, req, invalid, arguments, context, signoz_settings
                 )
     except (SQLAlchemyError, OSError, TimeoutError):
         logger.exception("tool call admission failed for assignment %s", context.assignment_id)
@@ -234,8 +274,11 @@ async def _admit_in(
     invalid: str | None,
     arguments: Any,
     context: ExecutionContext,
-    secrets: list[str],
+    signoz_settings: SigNozSettings | None,
 ) -> ToolExecutionResult | _Admitted:
+    # Filled once the credentials are resolved; arguments come from the model, which never
+    # sees a key, so earlier rejections have nothing to scrub.
+    secrets: list[str] = []
     name = scrub(tool_name, secrets, MAX_TOOL_NAME_CHARS)
     # The row lock serializes admission per assignment across workers, so budget counts,
     # the concurrency limit and idempotency lookups cannot race each other.
@@ -264,13 +307,15 @@ async def _admit_in(
     assignment, investigation_status, organization_id, environment = row
     await _expire_stale(session, assignment.id)
 
-    input_json = (
-        scrub_json(req.model_dump(mode="json"), secrets)
-        if req is not None
-        else sanitize_arguments(arguments, secrets)
-    )
-    if json_size(input_json) > MAX_INPUT_JSON_BYTES:
-        input_json = {"_omitted": f"arguments exceeded {MAX_INPUT_JSON_BYTES} bytes"}
+    def recorded_input() -> dict[str, Any]:
+        found = (
+            scrub_json(req.model_dump(mode="json"), secrets)
+            if req is not None
+            else sanitize_arguments(arguments, secrets)
+        )
+        if json_size(found) > MAX_INPUT_JSON_BYTES:
+            return {"_omitted": f"arguments exceeded {MAX_INPUT_JSON_BYTES} bytes"}
+        return found
 
     try:
         # The organization comes from the token, issued from these same rows; a token for
@@ -290,12 +335,18 @@ async def _admit_in(
             raise Rejection(
                 "policy.context_mismatch", "execution context does not match the assignment"
             )
-        # Before idempotent replay too: without credentials nothing is served (D033).
-        if not can_use_process_credentials(environment):
+        # Before idempotent replay too: without usable credentials nothing is served, not
+        # even a stored result (D033, D034). Resolved from the locked assignment's own
+        # environment row, never from anything the caller sent.
+        try:
+            credentials = await resolver.environment_credentials(session, environment)
+        except CredentialRefused as refused:
             raise Rejection(
-                "policy.credentials_not_configured",
-                "this environment has no telemetry credentials configured",
-            )
+                REFUSAL_CODES.get(refused.code, f"policy.{refused.code}"), refused.message
+            ) from None
+        connection = _connection(credentials, signoz_settings)
+        secrets = connection.secrets
+        input_json = recorded_input()
 
         if context.idempotency_key is not None:
             existing = await session.scalar(
@@ -356,9 +407,10 @@ async def _admit_in(
                 select(Environment.metadata_json).where(
                     Environment.status == EnvironmentStatus.ACTIVE,
                     Environment.id != environment.id,
-                    # Ambiguity is among environments sharing this telemetry backend: the
-                    # process-wide one. Others cannot claim (or block) its identities.
-                    Environment.organization_id.is_(None) | Environment.process_credentials,
+                    # Ambiguity is among environments that may query the same telemetry
+                    # backend; others cannot claim (or block) its identities. Identity
+                    # scoping on a shared backend is not tenant isolation (D034).
+                    resolver.shares_telemetry(credentials),
                 )
             )
         ).all()
@@ -381,7 +433,7 @@ async def _admit_in(
             tool_name=name,
             tool_category=spec.category if spec else ToolCategory.OTHER,
             status=ToolCallStatus.REJECTED,
-            input_json=input_json,
+            input_json=recorded_input(),
             completed_at=func.now(),
             error_code=rejection.code[:MAX_ERROR_CODE_CHARS],
             error_message=scrub(rejection.message, secrets, MAX_ERROR_MESSAGE_CHARS),
@@ -410,7 +462,7 @@ async def _admit_in(
         started_at=func.now(),
     )
     session.add(call)
-    return _Admitted(call.id, assignment.id, scope)
+    return _Admitted(call.id, assignment.id, scope, connection)
 
 
 async def _replay(session: AsyncSession, existing: ToolCall) -> ToolExecutionResult:
@@ -512,6 +564,26 @@ async def _call(
         await asyncio.sleep(policy.RETRY_BACKOFF_SECONDS)
 
 
+async def _guarded_run(
+    spec: ToolSpec,
+    req: BaseModel,
+    scope: Scope,
+    connection: _Connection,
+    client: httpx.AsyncClient | None,
+) -> _Run:
+    """An environment's own connection always goes through a fresh destination-guarded
+    client (vetted addresses at connect, no redirects, no proxies), closed after the call;
+    the process-wide one uses `client` as before."""
+    if connection.guarded is None or connection.settings is None:
+        return await _run(spec, req, scope, connection.settings, connection.error, client)
+    assert connection.guarded.config is not None
+    timeout = httpx.Timeout(connection.settings.timeout_seconds, connect=CONNECT_TIMEOUT_SECONDS)
+    async with guarded_client(
+        connection.guarded.config.telemetry_origins, allowlisted_only=False, timeout=timeout
+    ) as guarded:
+        return await _run(spec, req, scope, connection.settings, None, guarded)
+
+
 async def _run(
     spec: ToolSpec,
     req: BaseModel,
@@ -542,6 +614,8 @@ async def _run(
             ),
             attempts=attempts,
         )
+    except DestinationNotAllowed:
+        return _Run(ToolCallStatus.FAILED, error=DESTINATION_REFUSED, attempts=attempts)
     except SigNozError as exc:
         status = (
             ToolCallStatus.TIMED_OUT
@@ -597,6 +671,8 @@ async def _probe(
         count = coverage_count(result.data)
     except TimeoutError:
         return {**info, "telemetry_available": "unknown", "error_code": "executor.timeout"}
+    except DestinationNotAllowed:
+        return {**info, "telemetry_available": "unknown", "error_code": DESTINATION_REFUSED.code}
     except SigNozError as exc:
         return {**info, "telemetry_available": "unknown", "error_code": exc.code.value}
     except Exception as exc:

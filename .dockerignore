@@ -1,0 +1,20 @@
+# Build context for deploy/*.Dockerfile. Secrets never enter an image: no .env files,
+# no deploy/secrets, no local virtualenvs or caches.
+**/.env
+**/.env.*
+deploy/secrets/
+.git/
+.venv/
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+.ruff_cache/
+.claude/
+.mcp.*
+docs/
+tests/
+CLAUDE.md
+web/node_modules/
+web/dist/
+web/coverage/
+web/*.tsbuildinfo

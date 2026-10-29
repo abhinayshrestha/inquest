@@ -6,6 +6,8 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.credentials import resolver
+from src.credentials.resolver import CredentialRefused, Credentials
 from src.integrations.signoz.errors import SigNozError
 from src.integrations.signoz.settings import load_signoz_settings
 from src.investigators.llm import NebiusConfigError, load_nebius_settings
@@ -19,7 +21,6 @@ from src.models import (
     InvestigationStatus,
     ToolCall,
     ToolCallStatus,
-    can_use_process_credentials,
 )
 from src.schemas.environment import (
     AiProviderStatus,
@@ -33,6 +34,7 @@ from src.schemas.environment import (
     TelemetryCoverage,
     TelemetryScopeRead,
 )
+from src.services import access, limits
 from src.tools.policy import Rejection
 from src.tools.scope import SCOPE_KEY, claims, parse_scope
 
@@ -66,7 +68,16 @@ async def create_environment(
     owner_user_id: uuid.UUID | None = None,
 ) -> Environment:
     """The API passes the caller's checked organization and the caller as owner; without
-    them (host-side tooling) the environment is ownerless legacy-style."""
+    them (host-side tooling) the environment is ownerless legacy-style. QuotaExceeded at
+    the organization's environment limit, counted under its quota lock."""
+    if organization_id is not None:
+        await limits.lock(session, "organization", organization_id)
+        limits.require(
+            "environments_per_organization",
+            await session.scalar(
+                select(func.count()).where(Environment.organization_id == organization_id)
+            ),
+        )
     environment = Environment(
         **data.model_dump(include={"name", "type", "metadata_json"}),
         organization_id=organization_id,
@@ -77,9 +88,13 @@ async def create_environment(
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
-        # Only translate the unique-name violation; anything else is a real bug.
-        if exc.orig.diag.constraint_name == "uq_environments_organization_id_name":
+        # Only translate the unique-name violation and the owner's membership ending
+        # meanwhile (an owner must be a member); anything else is a real bug.
+        constraint = exc.orig.diag.constraint_name
+        if constraint == "uq_environments_organization_id_name":
             raise EnvironmentNameTaken(data.name) from exc
+        if constraint == "fk_environments_organization_id_organization_memberships":
+            raise access.NoAccess(organization_id) from exc
         raise
     return environment
 
@@ -116,7 +131,9 @@ async def list_environments(
     ]
 
 
-async def _scope(session: AsyncSession, environment: Environment) -> TelemetryScopeRead:
+async def _scope(
+    session: AsyncSession, environment: Environment, credentials: Credentials | None
+) -> TelemetryScopeRead:
     """The environment's SigNoz scope and the problems the Tool Executor would reject its
     queries for (missing, invalid, or an identity also claimed by another environment)."""
     raw = environment.metadata_json.get(SCOPE_KEY) if environment.metadata_json else None
@@ -138,20 +155,19 @@ async def _scope(session: AsyncSession, environment: Environment) -> TelemetrySc
             deployment_environment=None,
             problems=[ScopeProblem(code=exc.code, message=exc.message)],
         )
-    # Ambiguity only matters among environments that query the same telemetry backend:
-    # those using the process-wide development connection (the executor's rule). Tenant
-    # environments without a grant query nothing, so they neither have nor cause it.
+    # Ambiguity only matters among environments that may query the same telemetry backend
+    # (the executor's rule). Environments without usable credentials query nothing.
     others = (
         (
             await session.scalars(
                 select(Environment.metadata_json).where(
                     Environment.id != environment.id,
                     Environment.status == EnvironmentStatus.ACTIVE,
-                    shares_process_telemetry(),
+                    resolver.shares_telemetry(credentials),
                 )
             )
         ).all()
-        if can_use_process_credentials(environment)
+        if credentials is not None
         else []
     )
     problems = []
@@ -183,11 +199,6 @@ async def _scope(session: AsyncSession, environment: Environment) -> TelemetrySc
         deployment_environment=own.deployment_environment,
         problems=problems,
     )
-
-
-def shares_process_telemetry():
-    """SQL form of can_use_process_credentials."""
-    return Environment.organization_id.is_(None) | Environment.process_credentials
 
 
 def _issues(message: str) -> list[str]:
@@ -276,13 +287,60 @@ async def get_environment(session: AsyncSession, environment_id: uuid.UUID) -> E
     return await session.get(Environment, environment_id)
 
 
-CONFIGURATION_REQUIRED = ["per-environment credentials (not available until Phase 7C)"]
+# Detail states from the resolver's codes; the codes themselves name no values.
+CREDENTIAL_STATES = {
+    "configuration_required": "configuration_required",
+    "process_credentials_not_permitted": "configuration_required",
+    "credentials_unavailable": "unavailable",
+    "destination_not_allowed": "unavailable",
+    "telemetry_isolation_unverified": "unavailable",
+}
+
+
+def _refused_status(code: str) -> tuple[ProviderStatus, AiProviderStatus]:
+    issues = [code]
+    return (
+        ProviderStatus(provider="signoz", source="environment", configured=False, issues=issues),
+        AiProviderStatus(
+            provider="nebius_token_factory",
+            source="environment",
+            configured=False,
+            issues=issues,
+            main_model=None,
+            local_model=None,
+        ),
+    )
 
 
 async def environment_detail(session: AsyncSession, environment: Environment) -> EnvironmentDetail:
-    shared = can_use_process_credentials(environment)
-    # Without a grant, the process-wide settings are not this environment's and are not
-    # reported as if they were (D033).
+    # The same resolution runs use; the process-wide settings are reported only for an
+    # environment that would really run on them (D033, D034). Secrets are discarded here.
+    try:
+        credentials: Credentials | None = await resolver.environment_credentials(
+            session, environment
+        )
+    except CredentialRefused as refused:
+        credentials = None
+        state = CREDENTIAL_STATES[refused.code]
+        telemetry, ai = _refused_status(refused.code)
+    else:
+        if credentials.source == "process":
+            state = "process_development"
+            telemetry, ai = telemetry_provider_status(), ai_provider_status()
+        else:
+            state = "environment"
+            telemetry = ProviderStatus(
+                provider="signoz", source="environment", configured=True, issues=[]
+            )
+            # Model ids are not secrets (D034); the key and base URL never leave here.
+            ai = AiProviderStatus(
+                provider="nebius_token_factory",
+                source="environment",
+                configured=True,
+                issues=[],
+                main_model=credentials.nebius["main_model"],
+                local_model=credentials.nebius["local_model"],
+            )
     return EnvironmentDetail(
         id=environment.id,
         name=environment.name,
@@ -292,31 +350,11 @@ async def environment_detail(session: AsyncSession, environment: Environment) ->
         updated_at=environment.updated_at,
         organization_id=environment.organization_id,
         owner_user_id=environment.owner_user_id,
-        credentials="process_development" if shared else "configuration_required",
-        scope=await _scope(session, environment),
+        credentials=state,  # type: ignore[arg-type]
+        scope=await _scope(session, environment, credentials),
         stats=await _stats(session, environment.id),
-        telemetry_provider=(
-            telemetry_provider_status()
-            if shared
-            else ProviderStatus(
-                provider="signoz",
-                source="environment",
-                configured=False,
-                issues=CONFIGURATION_REQUIRED,
-            )
-        ),
-        ai_provider=(
-            ai_provider_status()
-            if shared
-            else AiProviderStatus(
-                provider="nebius_token_factory",
-                source="environment",
-                configured=False,
-                issues=CONFIGURATION_REQUIRED,
-                main_model=None,
-                local_model=None,
-            )
-        ),
+        telemetry_provider=telemetry,
+        ai_provider=ai,
     )
 
 

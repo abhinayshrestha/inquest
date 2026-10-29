@@ -31,6 +31,7 @@ from src.models import (
     TurnStatus,
 )
 from src.services import investigations, progress, turns
+from tests.credential_fixtures import allow_process_credentials
 from tests.investigators.conftest import MCP_SETTINGS, ScriptedModel
 from tests.investigators.test_main_graph import (  # noqa: F401
     ANSWER,
@@ -54,6 +55,7 @@ def mocked_signoz(signoz):  # noqa: F811
 @pytest.fixture
 async def member(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Member]:
     configure_auth(monkeypatch)
+    allow_process_credentials(monkeypatch)
     async with committed_members() as (signed_in,):
         yield signed_in
     load_auth_settings.cache_clear()
@@ -465,11 +467,11 @@ async def test_another_worker_holding_the_lock_prevents_duplicate_execution(api,
         assert response.status_code == 202
         (outcome,) = await finished(main_world)
         assert isinstance(outcome, runner.RunnerBusy)
-    turn = await turn_row(main_world.turn_id)
-    assert turn.status == TurnStatus.PENDING and turn.run_requested_at is not None
-    # The accepted turn is still owed a run: recovery (on the lock holder's side or
-    # after a restart) starts it exactly once.
-    script(rt, *happy(main_world))
+        turn = await turn_row(main_world.turn_id)
+        assert turn.status == TurnStatus.PENDING and turn.run_requested_at is not None
+        # The accepted turn is still owed a run: the dispatcher retries it once the lease
+        # is free (or recovery after a restart starts it), exactly once either way.
+        script(rt, *happy(main_world))
     await runtime.recover()
     await finished(main_world)
     async with SessionLocal() as s:

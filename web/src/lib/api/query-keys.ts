@@ -8,6 +8,8 @@ export const queryKeys = {
   environments: (organizationId: string) => ['environments', organizationId] as const,
   environment: (id: string) => ['environment', id] as const,
   telemetry: (id: string) => ['environment', id, 'telemetry'] as const,
+  // Statuses only; never values.
+  credentials: (id: string) => ['environment', id, 'credentials'] as const,
   investigations: ['investigations'] as const,
   investigationList: (organizationId: string) => ['investigations', organizationId] as const,
   investigation: (id: string) => ['investigation', id] as const,

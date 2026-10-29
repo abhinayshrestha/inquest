@@ -15,6 +15,9 @@ class SigNozSettings(BaseSettings):
     api_key: SecretStr
     timeout_seconds: float = 15.0
     max_response_bytes: int = 2_000_000
+    # Provider-scoped isolation (D037): the operator-bound ingestion key ids every
+    # query_range request is restricted to (client.request_json). Empty: no restriction.
+    tenant_key_ids: tuple[str, ...] = ()
 
 
 def load_signoz_settings() -> SigNozSettings:

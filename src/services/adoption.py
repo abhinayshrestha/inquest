@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.credentials.resolver import local_development
 from src.models import (
     AuditEvent,
     Environment,
@@ -52,6 +53,11 @@ async def plan_adoption(
         await session.scalars(select(Environment).where(Environment.id.in_(environment_ids)))
     )
     plan = AdoptionPlan(organization_id, owner_user_id, environments, [], process_credentials)
+    if process_credentials and not local_development():
+        # The resolver refuses grants outside local development anyway; never record one.
+        plan.problems.append(
+            "process-wide credential grants are permitted only in local development"
+        )
     missing = set(environment_ids) - {e.id for e in environments}
     plan.problems += [f"environment {i} does not exist" for i in sorted(missing, key=str)]
     plan.problems += [

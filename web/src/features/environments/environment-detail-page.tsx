@@ -88,6 +88,11 @@ export default function EnvironmentDetailPage() {
                 Configuration required
               </Badge>
             )}
+            {environment.credentials === 'unavailable' && (
+              <Badge variant="outline" className="border-warning/50 text-warning">
+                Credentials unavailable
+              </Badge>
+            )}
           </span>
         }
       />

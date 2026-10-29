@@ -1,8 +1,8 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { pageNavigation } from '@/app/contexts/auth'
+import { ACTIVITY_INTERVAL_MS, pageNavigation } from '@/app/contexts/auth'
 import { setCsrfToken } from '@/lib/api/client'
 import { inviteInput, PERMISSIONS } from '@/lib/api/organizations'
 import { mockFetch, renderRoute, requestsTo } from '@/test/render'
@@ -99,12 +99,78 @@ describe('sign-in states', () => {
     })
     renderRoute('/organizations')
     await userEvent.click(await screen.findByRole('button', { name: 'Account: Ada' }))
-    await userEvent.click(await screen.findByRole('menuitem', { name: /sign out/i }))
+    await userEvent.click(await screen.findByRole('menuitem', { name: 'Sign out' }))
     await waitFor(() => expect(requestsTo(fetchMock, 'POST', '/auth/logout')).toHaveLength(1))
     expect(headerOf(requestsTo(fetchMock, 'POST', '/auth/logout')[0], 'X-CSRF-Token')).toBe(
       'csrf-from-session',
     )
     expect(await screen.findByText('Sign in required')).toBeInTheDocument()
+  })
+
+  it('signs out everywhere after confirming, with the CSRF token, and says so', async () => {
+    const fetchMock = mockFetch({
+      'GET /auth/session': [{ body: SIGNED_IN }, { body: SIGNED_OUT }],
+      'GET /me': { body: { user: USER, memberships: [] } },
+      'POST /auth/logout-everywhere': { status: 204 },
+    })
+    renderRoute('/organizations')
+    await userEvent.click(await screen.findByRole('button', { name: 'Account: Ada' }))
+    await userEvent.click(await screen.findByRole('menuitem', { name: 'Sign out everywhere' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(within(dialog).getByText(/organizations, investigations and reports are kept/))
+    expect(requestsTo(fetchMock, 'POST', '/auth/logout-everywhere')).toHaveLength(0)
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Sign out everywhere' }))
+    expect(await within(dialog).findByText('Signed out everywhere')).toBeInTheDocument()
+    const [call] = requestsTo(fetchMock, 'POST', '/auth/logout-everywhere')
+    expect(headerOf(call, 'X-CSRF-Token')).toBe('csrf-from-session')
+    expect(requestsTo(fetchMock, 'POST', '/auth/logout')).toHaveLength(0)
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Close' }))
+    expect(await screen.findByText('Sign in required')).toBeInTheDocument()
+  })
+
+  it.each([
+    [500, 'Could not sign out everywhere. Your sessions are unchanged; try again.'],
+    [429, 'Too many attempts. Your sessions are unchanged; try again later.'],
+  ])('keeps the session and explains a failed sign out everywhere (%i)', async (status, text) => {
+    mockFetch({
+      'GET /auth/session': { body: SIGNED_IN },
+      'GET /me': { body: { user: USER, memberships: [] } },
+      'POST /auth/logout-everywhere': { status, body: { detail: '<b>server text</b>' } },
+    })
+    renderRoute('/organizations')
+    await userEvent.click(await screen.findByRole('button', { name: 'Account: Ada' }))
+    await userEvent.click(await screen.findByRole('menuitem', { name: 'Sign out everywhere' }))
+    const dialog = await screen.findByRole('alertdialog')
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Sign out everywhere' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(text)
+    expect(screen.queryByText(/server text/)).not.toBeInTheDocument()
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Go back' }))
+    expect(screen.getByRole('button', { name: 'Account: Ada' })).toBeInTheDocument()
+  })
+
+  it('reports real input as activity at most once a minute, never on its own', async () => {
+    const fetchMock = mockFetch({
+      'GET /auth/session': { body: SIGNED_IN },
+      'GET /me': { body: { user: USER, memberships: [] } },
+      'POST /auth/activity': { status: 204 },
+    })
+    let now = Date.now()
+    vi.spyOn(Date, 'now').mockImplementation(() => now)
+    renderRoute('/organizations')
+    await screen.findByRole('button', { name: 'Account: Ada' })
+    fireEvent.keyDown(window)
+    now += ACTIVITY_INTERVAL_MS + 1
+    expect(requestsTo(fetchMock, 'POST', '/auth/activity')).toHaveLength(0)
+    fireEvent.pointerDown(window)
+    fireEvent.keyDown(window)
+    fireEvent.wheel(window)
+    await waitFor(() => expect(requestsTo(fetchMock, 'POST', '/auth/activity')).toHaveLength(1))
+    expect(headerOf(requestsTo(fetchMock, 'POST', '/auth/activity')[0], 'X-CSRF-Token')).toBe(
+      'csrf-from-session',
+    )
+    now += 10 * ACTIVITY_INTERVAL_MS
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(requestsTo(fetchMock, 'POST', '/auth/activity')).toHaveLength(1)
   })
 })
 
@@ -117,6 +183,13 @@ describe('sign-in failures', () => {
     expect(screen.queryByText(/script/)).not.toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: 'Dismiss' }))
     expect(screen.queryByText('Sign-in failed')).not.toBeInTheDocument()
+  })
+
+  it('tells an authenticated but unapproved visitor what to do, and nothing else', async () => {
+    mockFetch({ 'GET /auth/session': { body: SIGNED_OUT } })
+    renderRoute('/?auth_error=not_admitted')
+    expect(await screen.findByText(/not approved to use Inquest/)).toBeInTheDocument()
+    expect(screen.getByText(/open the invitation link again/)).toBeInTheDocument()
   })
 })
 
@@ -268,15 +341,55 @@ describe('accepting invitations', () => {
     expect(headerOf(call, 'X-CSRF-Token')).toBe('csrf-from-session')
   })
 
-  it('keeps the token for this tab across sign-in only', async () => {
+  it('signs in with the token in the request body, never a URL, and keeps it for this tab', async () => {
     window.history.replaceState(null, '', '/invitations/accept#token=one-time-token')
-    mockFetch({ 'GET /auth/session': { body: SIGNED_OUT } })
+    const fetchMock = mockFetch({
+      'GET /auth/session': { body: SIGNED_OUT },
+      'POST /auth/login': { body: { authorization_url: 'https://idp.test/authorize?state=s' } },
+    })
     const assign = vi.spyOn(pageNavigation, 'assign').mockImplementation(() => {})
     renderRoute('/invitations/accept')
     await userEvent.click(await screen.findByRole('button', { name: 'Sign in to continue' }))
-    expect(assign).toHaveBeenCalledWith('/api/auth/login?return_to=%2Finvitations%2Faccept')
+    await waitFor(() => expect(assign).toHaveBeenCalledWith('https://idp.test/authorize?state=s'))
+    const [call] = requestsTo(fetchMock, 'POST', '/auth/login')
+    expect(JSON.parse(String((call?.[1] as RequestInit).body))).toEqual({
+      invitation_token: 'one-time-token',
+      return_to: '/invitations/accept',
+    })
+    expect(String(call?.[0])).not.toContain('one-time-token')
     expect(window.sessionStorage.getItem('inquest.pendingInvitation')).toBe('one-time-token')
     expect(window.localStorage.length).toBe(0)
+  })
+
+  it('explains when the sign-in cannot start and lets the visitor retry', async () => {
+    window.history.replaceState(null, '', '/invitations/accept#token=one-time-token')
+    mockFetch({
+      'GET /auth/session': { body: SIGNED_OUT },
+      'POST /auth/login': {
+        status: 429,
+        body: { detail: { code: 'rate_limited', message: 'too many requests; try again later' } },
+      },
+    })
+    const assign = vi.spyOn(pageNavigation, 'assign').mockImplementation(() => {})
+    renderRoute('/invitations/accept')
+    await userEvent.click(await screen.findByRole('button', { name: 'Sign in to continue' }))
+    expect(await screen.findByRole('button', { name: 'Sign in to continue' })).toBeEnabled()
+    expect(assign).not.toHaveBeenCalled()
+  })
+
+  it('opens the organization a new user joined by signing in from the invitation', async () => {
+    window.sessionStorage.setItem('inquest.pendingInvitation', 'one-time-token')
+    window.history.replaceState(null, '', `/invitations/accept?joined=${ORG}`)
+    const fetchMock = mockFetch({
+      'GET /auth/session': { body: SIGNED_IN },
+      'GET /me': { body: { user: USER, memberships: [membership(ORG, 'Platform', 'member')] } },
+      [`GET /organizations/${ORG}`]: { body: organization('member') },
+      [`GET /organizations/${ORG}/members`]: { body: members },
+    })
+    const { router } = renderRoute(`/invitations/accept?joined=${ORG}`)
+    await waitFor(() => expect(router.state.location.pathname).toBe(`/organizations/${ORG}`))
+    expect(requestsTo(fetchMock, 'POST', '/invitations/accept')).toHaveLength(0)
+    expect(window.sessionStorage.getItem('inquest.pendingInvitation')).toBeNull()
   })
 
   it('explains a used, expired or revoked invitation and offers no retry', async () => {
@@ -319,12 +432,12 @@ describe('permission model', () => {
         .getAllByLabelText(/allowed/i)
         .map((c) => c.getAttribute('aria-label')),
     ).toEqual(['Not allowed', 'Not allowed', 'Not allowed', 'Allowed'])
-    expect(within(row).getByText('Planned')).toBeInTheDocument()
+    expect(within(row).getByText('Enforced')).toBeInTheDocument()
     const credentials = PERMISSIONS.find((p) => p.action.includes('credentials'))!
     expect([credentials.owner, credentials.admin, credentials.enforced]).toEqual([
       false,
       false,
-      false,
+      true,
     ])
   })
 

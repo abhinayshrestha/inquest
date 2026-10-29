@@ -25,9 +25,8 @@ from src.tools import policy as tool_policy
 from tests.mcp_server.conftest import SECRET, mcp_app, signoz  # noqa: F401
 from tests.tools.conftest import World, make_world, world  # noqa: F401
 
-MCP_SETTINGS = McpSettings(
-    token_secret=SECRET, allowed_hosts=["testserver"], url="http://testserver/"
-)
+# Mints tokens; the derived URL (the loopback listener) reaches the in-process app.
+MCP_SETTINGS = McpSettings(token_secret=SECRET)
 USAGE = {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}
 EVIDENCE_REF = re.compile(r"\bev_[0-9a-f]{8}\b")
 HYPOTHESIS_REF = re.compile(r"\bhy_[0-9a-f]{8}\b")

@@ -22,6 +22,7 @@ from src.models import (
     TurnStatus,
 )
 from src.schemas.investigation import InvestigationCreate
+from src.services import limits
 from src.services.progress import append_progress_event
 
 INITIAL_ROUND = 1
@@ -87,6 +88,30 @@ async def lock_investigation(session: AsyncSession, investigation_id: uuid.UUID)
     return investigation
 
 
+async def require_daily_quotas(
+    session: AsyncSession, organization_id: uuid.UUID, *, investigation: bool
+) -> None:
+    """QuotaExceeded once the organization created its investigations (when creating one)
+    or turns allowed per day. Holds its quota lock until the transaction ends, so concurrent
+    creations count each other; taken before capacity and row locks."""
+    await limits.lock(session, "organization", organization_id)
+    if investigation:
+        await limits.require_daily(
+            session,
+            "investigations_per_organization_per_day",
+            select(Investigation.created_at).where(
+                Investigation.organization_id == organization_id
+            ),
+        )
+    await limits.require_daily(
+        session,
+        "turns_per_organization_per_day",
+        select(InvestigationTurn.created_at)
+        .join(Investigation, Investigation.id == InvestigationTurn.investigation_id)
+        .where(Investigation.organization_id == organization_id),
+    )
+
+
 async def create_investigation(
     session: AsyncSession, data: InvestigationCreate, *, created_by: uuid.UUID | None = None
 ) -> Investigation:
@@ -97,6 +122,8 @@ async def create_investigation(
     environment = await session.get(Environment, data.environment_id)
     if environment is None:
         raise EnvironmentNotFound(data.environment_id)
+    if environment.organization_id is not None:
+        await require_daily_quotas(session, environment.organization_id, investigation=True)
 
     investigation = Investigation(
         title=data.title,

@@ -2,6 +2,7 @@ import { ShieldAlert } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { IncomingTransfers } from '@/features/environments/incoming-transfers'
 
 import { MobileNav } from './mobile-nav'
 import { OrganizationSwitcher } from './organization-switcher'
@@ -22,10 +23,11 @@ export function Header() {
             </Badge>
           </TooltipTrigger>
           <TooltipContent className="max-w-72">
-            Data is isolated per organization, but environments cannot hold their own credentials
-            yet, so most cannot run investigations. Not for public deployment.
+            Data is isolated per organization and environments run on their own credentials, but the
+            remaining isolation gaps keep this private. Not for public deployment.
           </TooltipContent>
         </Tooltip>
+        <IncomingTransfers />
         <ThemeMenu />
         <UserMenu />
       </div>

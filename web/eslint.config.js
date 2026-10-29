@@ -31,7 +31,18 @@ export default defineConfig([
           message: 'Render content through validated components, never raw HTML.',
         },
       ],
+      'no-restricted-imports': [
+        'error',
+        {
+          // The configured instance keeps zod from probing eval under the CSP (D041).
+          paths: [{ name: 'zod', message: "Import z from '@/lib/zod'." }],
+        },
+      ],
     },
+  },
+  {
+    files: ['src/lib/zod.ts'],
+    rules: { 'no-restricted-imports': 'off' },
   },
   {
     // shadcn/ui primitives export variants alongside components; contexts export their

@@ -2,7 +2,15 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createContext, useContext, useEffect, useMemo, type ReactNode } from 'react'
 
 import { ApiError, setCsrfToken } from '@/lib/api/client'
-import { getSession, logout, signInUrl, type User } from '@/lib/api/organizations'
+import {
+  getSession,
+  logout,
+  logoutEverywhere,
+  recordActivity,
+  signInUrl,
+  startInvitationSignIn,
+  type User,
+} from '@/lib/api/organizations'
 
 // Who is signed in, from the backend session (an HttpOnly cookie the page cannot read).
 // The page never decides identity: it only shows what GET /auth/session reports, and the
@@ -14,7 +22,11 @@ type AuthState = {
   status: AuthStatus
   user: User | null
   signIn: (returnTo?: string) => void
+  // Rejects when the sign-in could not be started (rate limit, sign-in unavailable).
+  signInWithInvitation: (token: string, returnTo: string) => Promise<void>
   signOut: () => Promise<void>
+  // Ends the sessions in every browser (D043); rejects when it failed, sessions unchanged.
+  signOutEverywhere: () => Promise<void>
   signingOut: boolean
 }
 
@@ -25,6 +37,11 @@ export const SESSION_KEY = ['auth', 'session'] as const
 // Full-page navigation to the backend login. An object so tests can replace it: jsdom's
 // window.location cannot be stubbed.
 export const pageNavigation = { assign: (url: string) => window.location.assign(url) }
+
+// Input that shows a person is at the page. Polling, refetches and the event stream never
+// move the session's idle deadline (D043); this does, at most once a minute.
+const ACTIVITY_EVENTS = ['pointerdown', 'keydown', 'wheel', 'touchstart'] as const
+export const ACTIVITY_INTERVAL_MS = 60_000
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const client = useQueryClient()
@@ -59,15 +76,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [client])
 
-  const signOut = useMutation({
-    mutationFn: logout,
-    onSettled: async () => {
-      setCsrfToken(null)
-      // Everything cached belonged to the signed-in user.
-      client.removeQueries({ predicate: (q) => q.queryKey[0] !== 'auth' })
-      await client.invalidateQueries({ queryKey: SESSION_KEY })
-    },
-  })
+  const forget = async () => {
+    setCsrfToken(null)
+    // Everything cached belonged to the signed-in user.
+    client.removeQueries({ predicate: (q) => q.queryKey[0] !== 'auth' })
+    await client.invalidateQueries({ queryKey: SESSION_KEY })
+  }
+  const signOut = useMutation({ mutationFn: logout, onSettled: forget })
+  // Only on success: after a failure the sessions, this one included, are unchanged.
+  const signOutEverywhere = useMutation({ mutationFn: logoutEverywhere, onSuccess: forget })
+
+  const signedIn = session.data?.authenticated === true
+  useEffect(() => {
+    if (!signedIn) return
+    let last = Date.now()
+    const active = () => {
+      if (document.visibilityState !== 'visible' || Date.now() - last < ACTIVITY_INTERVAL_MS) return
+      last = Date.now()
+      recordActivity().catch((error: unknown) => {
+        if (error instanceof ApiError && error.kind === 'unauthorized')
+          void client.invalidateQueries({ queryKey: SESSION_KEY })
+      })
+    }
+    for (const name of ACTIVITY_EVENTS) window.addEventListener(name, active, { passive: true })
+    return () => {
+      for (const name of ACTIVITY_EVENTS) window.removeEventListener(name, active)
+    }
+  }, [client, signedIn])
 
   const value = useMemo<AuthState>(() => {
     const data = session.data
@@ -86,12 +121,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       signIn: (returnTo = window.location.pathname) => {
         pageNavigation.assign(signInUrl(returnTo))
       },
+      signInWithInvitation: async (token, returnTo) => {
+        const { authorization_url } = await startInvitationSignIn(token, returnTo)
+        pageNavigation.assign(authorization_url)
+      },
       signOut: async () => {
         await signOut.mutateAsync().catch(() => undefined)
       },
-      signingOut: signOut.isPending,
+      signOutEverywhere: async () => {
+        await signOutEverywhere.mutateAsync()
+      },
+      signingOut: signOut.isPending || signOutEverywhere.isPending,
     }
-  }, [session.isPending, session.data, signOut])
+  }, [session.isPending, session.data, signOut, signOutEverywhere])
 
   return <AuthContext value={value}>{children}</AuthContext>
 }

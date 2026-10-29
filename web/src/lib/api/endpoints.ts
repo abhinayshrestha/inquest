@@ -24,7 +24,8 @@ import {
 
 // One function per existing FastAPI route (src/api/routes/). Collections take the selected
 // organization; the backend checks the session's membership on every request (D033), so
-// this is a selector, never an authorization input. Credential writes do not exist (7C).
+// this is a selector, never an authorization input. Credentials: lib/api/credentials.ts;
+// ownership transfers: lib/api/transfers.ts.
 
 type Options = { signal?: AbortSignal }
 

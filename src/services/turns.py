@@ -28,10 +28,12 @@ from src.models import (
     TurnKind,
     TurnStatus,
 )
+from src.services import leases
 from src.services.investigations import (
     TERMINAL,
     InvalidTransition,
     lock_investigation,
+    require_daily_quotas,
     transition_investigation,
 )
 from src.services.progress import append_progress_event
@@ -84,11 +86,22 @@ async def _locked_turn(
     if investigation_id is None:
         raise TurnNotFound(turn_id)
     investigation = await lock_investigation(session, investigation_id)
+    # Inside a run, only the current lease holder moves the turn (D036).
+    await leases.check_fence(session, investigation_id)
     turn = await session.scalar(
         select(InvestigationTurn).where(InvestigationTurn.id == turn_id).with_for_update()
     )
     assert turn is not None
     return turn, investigation
+
+
+async def _admit(session: AsyncSession, investigation_id: uuid.UUID) -> None:
+    """Capacity admission before the investigation lock (lock order: capacity first).
+    Raises leases.QueueFull; the caller rolls back."""
+    organization_id = await session.scalar(
+        select(Investigation.organization_id).where(Investigation.id == investigation_id)
+    )
+    await leases.admit(session, organization_id)
 
 
 def _move(turn: InvestigationTurn, to: TurnStatus) -> None:
@@ -107,7 +120,15 @@ async def create_follow_up_turn(
 ) -> InvestigationTurn:
     """A new question for an idle investigation. Refused while another turn is active or
     once the investigation is closed. `request_run` also accepts it for execution in the
-    same transaction (see request_turn_run)."""
+    same transaction (see request_turn_run). QuotaExceeded beyond the organization's turns
+    per day."""
+    organization_id = await session.scalar(
+        select(Investigation.organization_id).where(Investigation.id == investigation_id)
+    )
+    if organization_id is not None:
+        await require_daily_quotas(session, organization_id, investigation=False)
+    if request_run:
+        await _admit(session, investigation_id)
     investigation = await lock_investigation(session, investigation_id)
     active = await session.scalar(
         select(func.count())
@@ -167,7 +188,14 @@ async def create_follow_up_turn(
 async def request_turn_run(session: AsyncSession, turn_id: uuid.UUID) -> InvestigationTurn:
     """Accepts a pending turn for execution, exactly once. The mark is what lets recovery
     start a turn that was accepted but never started (process died in between), while
-    never starting a turn that was only created."""
+    never starting a turn that was only created. Refused with leases.QueueFull when the
+    organization or the server already has its maximum of active turns."""
+    investigation_id = await session.scalar(
+        select(InvestigationTurn.investigation_id).where(InvestigationTurn.id == turn_id)
+    )
+    if investigation_id is None:
+        raise TurnNotFound(turn_id)
+    await _admit(session, investigation_id)
     turn, _ = await _locked_turn(session, turn_id)
     if turn.status != TurnStatus.PENDING:
         raise TurnConflict(f"turn {turn_id} is {turn.status}, not pending")

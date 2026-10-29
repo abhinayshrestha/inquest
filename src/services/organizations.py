@@ -7,6 +7,10 @@ gets NotFound for it, so outsiders cannot even learn that it exists.
 Roles: owner — everything, including roles; admin — invite members, revoke invitations,
 remove members; member — see the organization and its members. Organization roles grant
 no access to any environment's credentials (D029).
+
+A member who owns environments can neither leave nor be removed until they transferred
+them (D035): checked here with a clear message, and enforced by the database (the
+environments → memberships foreign key), whatever the race.
 """
 
 import re
@@ -21,12 +25,16 @@ from sqlalchemy.orm import aliased
 
 from src.auth.sessions import digest
 from src.models import (
+    Environment,
+    EnvironmentTransfer,
     Organization,
     OrganizationInvitation,
     OrganizationMembership,
     OrganizationRole,
+    TransferStatus,
     User,
 )
+from src.services import limits, transfers
 
 INVITATION_DAYS = 7
 R = OrganizationRole
@@ -69,7 +77,7 @@ async def membership_role(
     return role
 
 
-async def _require(
+async def require_role(
     session: AsyncSession, organization_id: uuid.UUID, user: User, allowed: frozenset
 ) -> OrganizationRole:
     role = await membership_role(session, organization_id, user)
@@ -78,10 +86,45 @@ async def _require(
     return role
 
 
+async def _memberships(session: AsyncSession, user_id: uuid.UUID) -> int | None:
+    return await session.scalar(
+        select(func.count()).where(OrganizationMembership.user_id == user_id)
+    )
+
+
+async def _pending_invitations(
+    session: AsyncSession, organization_id: uuid.UUID, now: datetime
+) -> int | None:
+    return await session.scalar(
+        select(func.count()).where(
+            OrganizationInvitation.organization_id == organization_id,
+            OrganizationInvitation.accepted_at.is_(None),
+            OrganizationInvitation.revoked_at.is_(None),
+            OrganizationInvitation.expires_at > now,
+        )
+    )
+
+
+async def _members(session: AsyncSession, organization_id: uuid.UUID) -> int | None:
+    return await session.scalar(
+        select(func.count()).where(OrganizationMembership.organization_id == organization_id)
+    )
+
+
 async def create_organization(session: AsyncSession, user: User, name: str) -> Organization:
+    """QuotaExceeded beyond the organizations a user may create or belong to; counted
+    under the user's quota lock, so concurrent creations cannot overshoot."""
     name = " ".join(name.split())
     if not name:
         raise Conflict("name is empty")
+    await limits.lock(session, "user", user.id)
+    limits.require(
+        "organizations_per_user",
+        await session.scalar(
+            select(func.count()).where(Organization.created_by_user_id == user.id)
+        ),
+    )
+    limits.require("memberships_per_user", await _memberships(session, user.id))
     base = _slug(name)
     taken = set(
         await session.scalars(select(Organization.slug).where(Organization.slug.like(f"{base}%")))
@@ -177,7 +220,7 @@ async def change_role(
     target_user_id: uuid.UUID,
     role: OrganizationRole,
 ) -> OrganizationMembership:
-    await _require(session, organization_id, user, frozenset({R.OWNER}))
+    await require_role(session, organization_id, user, frozenset({R.OWNER}))
     membership = await _locked_membership(session, organization_id, target_user_id)
     if membership.role == R.OWNER and role != R.OWNER:
         if await _owner_count(session, organization_id) <= 1:
@@ -187,10 +230,27 @@ async def change_role(
     return membership
 
 
+OWNS_ENVIRONMENTS = "this member owns environments here; transfer them before leaving or removal"
+
+
 async def remove_member(
     session: AsyncSession, organization_id: uuid.UUID, user: User, target_user_id: uuid.UUID
 ) -> None:
     acting = await membership_role(session, organization_id, user)
+    # Pending transfers to the member close with the membership. Locked before it: transfer
+    # acceptance locks the transfer and then (through the owner foreign key) the membership.
+    incoming = list(
+        await session.scalars(
+            select(EnvironmentTransfer)
+            .join(Environment, Environment.id == EnvironmentTransfer.environment_id)
+            .where(
+                Environment.organization_id == organization_id,
+                EnvironmentTransfer.to_user_id == target_user_id,
+                EnvironmentTransfer.status == TransferStatus.PENDING,
+            )
+            .with_for_update(of=EnvironmentTransfer)
+        )
+    )
     membership = await _locked_membership(session, organization_id, target_user_id)
     leaving = target_user_id == user.id
     # Members may leave; admins remove members; owners remove anyone.
@@ -200,8 +260,30 @@ async def remove_member(
         raise Forbidden(acting)
     if membership.role == R.OWNER and await _owner_count(session, organization_id) <= 1:
         raise Conflict("an organization needs at least one owner")
+    owned = await session.scalar(
+        select(func.count()).where(
+            Environment.organization_id == organization_id,
+            Environment.owner_user_id == target_user_id,
+        )
+    )
+    if owned:
+        raise Conflict(OWNS_ENVIRONMENTS)
+    for transfer in incoming:
+        transfers.close(transfer, TransferStatus.CANCELLED, user)
+        session.add(
+            transfers.audit(
+                "transfer.cancel", organization_id, user, transfer, reason="recipient_not_member"
+            )
+        )
     await session.delete(membership)
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        # An environment became theirs after the check above (a transfer accepted meanwhile).
+        if exc.orig.diag.constraint_name == transfers.OWNER_MEMBERSHIP_FK:
+            raise Conflict(OWNS_ENVIRONMENTS) from exc
+        raise
 
 
 def invitation_status(invitation: OrganizationInvitation, now: datetime) -> str:
@@ -219,10 +301,13 @@ async def create_invitation(
     email: str,
     role: OrganizationRole,
 ) -> tuple[OrganizationInvitation, str]:
-    """Returns the invitation and its raw token (to build the link once; never stored)."""
-    acting = await _require(session, organization_id, user, MANAGERS)
+    """Returns the invitation and its raw token (to build the link once; never stored).
+    QuotaExceeded beyond the organization's pending invitations, or members plus pending
+    invitations; counted under its quota lock."""
+    acting = await require_role(session, organization_id, user, MANAGERS)
     if role == R.OWNER or (role == R.ADMIN and acting != R.OWNER):
         raise Forbidden("only owners invite admins; nobody is invited as owner")
+    await limits.lock(session, "organization", organization_id)
     email = email.strip().lower()
     member = await session.scalar(
         select(OrganizationMembership.user_id)
@@ -246,6 +331,11 @@ async def create_invitation(
     if previous is not None:
         previous.revoked_at, previous.revoked_by_user_id = now, user.id
         await session.flush()
+    pending = await _pending_invitations(session, organization_id, now) or 0
+    limits.require("pending_invitations_per_organization", pending)
+    limits.require(
+        "members_per_organization", (await _members(session, organization_id) or 0) + pending
+    )
     token = secrets.token_urlsafe(32)
     invitation = OrganizationInvitation(
         organization_id=organization_id,
@@ -264,7 +354,7 @@ async def create_invitation(
 async def list_invitations(
     session: AsyncSession, organization_id: uuid.UUID, user: User
 ) -> list[tuple[OrganizationInvitation, User | None]]:
-    await _require(session, organization_id, user, MANAGERS)
+    await require_role(session, organization_id, user, MANAGERS)
     inviter = aliased(User)
     rows = await session.execute(
         select(OrganizationInvitation, inviter)
@@ -279,7 +369,7 @@ async def list_invitations(
 async def revoke_invitation(
     session: AsyncSession, organization_id: uuid.UUID, user: User, invitation_id: uuid.UUID
 ) -> None:
-    await _require(session, organization_id, user, MANAGERS)
+    await require_role(session, organization_id, user, MANAGERS)
     invitation = await session.scalar(
         select(OrganizationInvitation)
         .where(
@@ -299,10 +389,31 @@ async def revoke_invitation(
 async def accept_invitation(session: AsyncSession, user: User, token: str) -> Organization:
     """Single use: the row is locked, checked and marked accepted in one transaction. The
     signed-in user's provider-verified email must be the invited address, so a forwarded
-    or leaked link is useless to anyone else."""
+    or leaked link is useless to anyone else. QuotaExceeded beyond the organization's
+    members or the user's memberships; quota locks (organization, then user) are taken
+    before the invitation row, in the order invitation creation takes them."""
+    organization = await accept_invitation_uncommitted(session, user, digest(token))
+    await session.commit()
+    return organization
+
+
+async def accept_invitation_uncommitted(
+    session: AsyncSession, user: User, token_hash: str
+) -> Organization:
+    """accept_invitation by token hash, leaving the commit to the caller: admission at
+    sign-in (D042) creates the user, its admission and the membership in one transaction."""
+    organization_id = await session.scalar(
+        select(OrganizationInvitation.organization_id).where(
+            OrganizationInvitation.token_hash == token_hash
+        )
+    )
+    if organization_id is None:
+        raise InvitationUnusable()
+    await limits.lock(session, "organization", organization_id)
+    await limits.lock(session, "user", user.id)
     invitation = await session.scalar(
         select(OrganizationInvitation)
-        .where(OrganizationInvitation.token_hash == digest(token))
+        .where(OrganizationInvitation.token_hash == token_hash)
         .with_for_update()
     )
     now = datetime.now(UTC)
@@ -318,12 +429,12 @@ async def accept_invitation(session: AsyncSession, user: User, token: str) -> Or
     )
     if existing is not None:
         raise Conflict("already a member")
+    limits.require("members_per_organization", await _members(session, organization_id))
+    limits.require("memberships_per_user", await _memberships(session, user.id))
     session.add(
         OrganizationMembership(
             organization_id=invitation.organization_id, user_id=user.id, role=invitation.role
         )
     )
     invitation.accepted_at, invitation.accepted_by_user_id = now, user.id
-    organization = await session.get(Organization, invitation.organization_id)
-    await session.commit()
-    return organization
+    return await session.get(Organization, invitation.organization_id)

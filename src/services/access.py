@@ -8,19 +8,19 @@ into 404 so a guessed id reveals nothing.
 """
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.auth.sessions import admitted
+from src.auth.settings import AuthNotConfigured, load_auth_settings
 from src.models import (
     AuthSession,
     Environment,
     Investigation,
-    InvestigationEnvironment,
     OrganizationMembership,
     User,
-    can_use_process_credentials,
 )
 
 
@@ -76,8 +76,14 @@ async def investigation_for(
 async def still_allowed(
     session: AsyncSession, auth_session_id: uuid.UUID, investigation_id: uuid.UUID
 ) -> bool:
-    """For long-lived responses (SSE): the browser session is still valid and its user is
-    still a member of the investigation's organization."""
+    """For long-lived responses (SSE): the browser session is still valid (not revoked,
+    within its absolute and idle deadlines: the stream itself never moves the idle
+    deadline, D043), its user is enabled and, under approval, admitted, and still a member
+    of the investigation's organization."""
+    try:
+        settings = load_auth_settings()
+    except AuthNotConfigured:
+        return False  # no sign-in, so no session can be valid
     now = datetime.now(UTC)
     found = await session.scalar(
         select(Investigation.id)
@@ -92,20 +98,10 @@ async def still_allowed(
             AuthSession.id == auth_session_id,
             AuthSession.revoked_at.is_(None),
             AuthSession.expires_at > now,
+            AuthSession.last_seen_at > now - timedelta(minutes=settings.idle_minutes),
             User.disabled_at.is_(None),
+            # A withdrawn admission ends open streams too (D042).
+            admitted(User.id) if settings.admission == "approval" else true(),
         )
     )
     return found is not None
-
-
-async def investigation_runnable(session: AsyncSession, investigation_id: uuid.UUID) -> bool:
-    """Every environment in scope may run with the credentials available to this backend.
-    Until per-environment credentials exist (7C) that means process-wide development
-    credentials, which tenant environments only get through an operator grant."""
-    environments = await session.scalars(
-        select(Environment)
-        .join(InvestigationEnvironment, InvestigationEnvironment.environment_id == Environment.id)
-        .where(InvestigationEnvironment.investigation_id == investigation_id)
-    )
-    found = list(environments)
-    return bool(found) and all(can_use_process_credentials(e) for e in found)

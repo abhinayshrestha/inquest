@@ -10,14 +10,20 @@ from src.db.base import Base, ImmutableRecordError, UUIDPrimaryKeyMixin
 
 
 class AuditEvent(UUIDPrimaryKeyMixin, Base):
-    """Operator actions that change who owns data, e.g. adopting legacy records (D032).
-    Append-only. Never holds credentials."""
+    """Actions that change who owns data or its credentials: operator commands (legacy
+    adoption, D032; credential key rotation) and owners' credential changes (D034).
+    Append-only. Never holds credentials, URLs or any part of a secret."""
 
     __tablename__ = "audit_events"
 
     action: Mapped[str] = mapped_column(String(64))
-    # Who ran it: the operator name given to the command plus the OS account.
+    # Who ran it: the operator name given to the command plus the OS account, or
+    # "user:<id>" for API actions.
     actor: Mapped[str] = mapped_column(String(200))
+    # The signed-in user for API actions; NULL for operator commands.
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
     organization_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("organizations.id", ondelete="RESTRICT"), index=True
     )

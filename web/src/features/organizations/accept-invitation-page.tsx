@@ -1,6 +1,6 @@
 import { Building2, Loader2, MailCheck, MailX } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router'
+import { useNavigate, useSearchParams } from 'react-router'
 
 import { useAuth } from '@/app/contexts/auth'
 import { useOrganization } from '@/app/contexts/organization'
@@ -50,16 +50,38 @@ function keepForSignIn(token: string) {
   }
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
 export default function AcceptInvitationPage() {
   const [token] = useState(readToken)
   useEffect(forgetToken, [])
-  const { status, user, signIn } = useAuth()
+  const { status, user, signInWithInvitation } = useAuth()
   const { selectOrganization } = useOrganization()
   const accept = useAcceptInvitation()
   const navigate = useNavigate()
+  const [starting, setStarting] = useState(false)
+  const [startError, setStartError] = useState<unknown>(null)
+  // Set by the backend when signing in accepted the invitation (a new user admitted by it,
+  // D042). The server checks membership on every request; this only picks the page.
+  const joined = useSearchParams()[0].get('joined')
+  const joinedId = joined && UUID.test(joined) ? joined : null
+  useEffect(() => {
+    if (joinedId && status === 'signed_in') {
+      selectOrganization(joinedId)
+      navigate(`/organizations/${joinedId}`, { replace: true })
+    }
+  }, [joinedId, status, selectOrganization, navigate])
 
   let body
-  if (!token) {
+  if (joinedId && status !== 'signed_out') {
+    body = (
+      <EmptyState
+        icon={Loader2}
+        title="Opening your organization"
+        description="Your invitation was accepted."
+      />
+    )
+  } else if (!token) {
     body = (
       <EmptyState
         icon={MailX}
@@ -73,14 +95,27 @@ export default function AcceptInvitationPage() {
         <EmptyState
           icon={MailCheck}
           title="Sign in to accept this invitation"
-          description="Sign in with the email address the invitation was sent to."
+          description={
+            startError
+              ? describeError(startError).description
+              : 'Sign in with the email address the invitation was sent to.'
+          }
           action={
             <Button
+              disabled={starting}
               onClick={() => {
+                // Still kept for visitors who already use Inquest: they accept after
+                // signing in. Others are admitted by the sign-in itself.
                 keepForSignIn(token)
-                signIn('/invitations/accept')
+                setStarting(true)
+                setStartError(null)
+                signInWithInvitation(token, '/invitations/accept').catch((error: unknown) => {
+                  setStarting(false)
+                  setStartError(error)
+                })
               }}
             >
+              {starting && <Loader2 aria-hidden className="animate-spin" />}
               Sign in to continue
             </Button>
           }

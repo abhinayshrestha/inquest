@@ -2,7 +2,14 @@ import uuid
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import CheckConstraint, ForeignKey, String, UniqueConstraint, text
+from sqlalchemy import (
+    CheckConstraint,
+    ForeignKey,
+    ForeignKeyConstraint,
+    String,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -37,6 +44,16 @@ class Environment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint(
             "(organization_id IS NULL) = (owner_user_id IS NULL)", name="owner_with_organization"
         ),
+        # Target of environment_credentials' (environment_id, owner_user_id) foreign key.
+        UniqueConstraint("id", "owner_user_id"),
+        # The owner is always a current member: a membership cannot be deleted (leaving,
+        # removal) while its user owns environments there, so ownership is never orphaned
+        # and must be transferred first (D035). Ownerless legacy rows (NULLs) are exempt.
+        ForeignKeyConstraint(
+            ["organization_id", "owner_user_id"],
+            ["organization_memberships.organization_id", "organization_memberships.user_id"],
+            ondelete="RESTRICT",
+        ),
     )
 
     name: Mapped[str] = mapped_column(String(255))
@@ -51,14 +68,15 @@ class Environment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     organization_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("organizations.id", ondelete="RESTRICT"), index=True
     )
-    # The authenticated creator (D026). Only the owner will configure credentials (7C).
+    # The authenticated creator (D026), until an accepted transfer (D035). Only the owner
+    # configures credentials.
     owner_user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="RESTRICT"), index=True
     )
     # Granted only by an operator (scripts.adopt_legacy --allow-process-credentials): this
-    # environment may run with the backend's process-wide development credentials. Tenant
-    # environments never get them implicitly; without a grant (and until 7C) they cannot
-    # run investigations.
+    # environment may run with the backend's process-wide development credentials, where
+    # the server permits it and while it has no credentials of its own. Tenant
+    # environments never get them implicitly (src/credentials/resolver.py, D034).
     process_credentials: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
     # `metadata` is reserved by SQLAlchemy Declarative.
     metadata_json: Mapped[dict[str, Any]] = mapped_column(
@@ -70,10 +88,3 @@ class Environment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     assignments: Mapped[list["InvestigationAssignment"]] = relationship(
         back_populates="environment", passive_deletes="all", lazy="raise"
     )
-
-
-def can_use_process_credentials(environment: Environment) -> bool:
-    """Whether runs may use the backend's process-wide development credentials (.env):
-    ownerless legacy environments, reachable only by host-side tooling (D032), and
-    environments an operator explicitly granted them. Never other tenant environments."""
-    return environment.organization_id is None or environment.process_credentials

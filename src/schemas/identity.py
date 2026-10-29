@@ -92,6 +92,20 @@ class InvitationCreated(InvitationRead):
     accept_url: str
 
 
+class InvitationSignIn(BaseModel):
+    """POST /auth/login: sign in from an invitation link (D042)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    invitation_token: str = Field(min_length=20, max_length=200)
+    return_to: str | None = Field(default=None, max_length=500)
+
+
+class SignInStart(BaseModel):
+    # The provider's authorization URL; the browser navigates there.
+    authorization_url: str
+
+
 class InvitationAccept(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

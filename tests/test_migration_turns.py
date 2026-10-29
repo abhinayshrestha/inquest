@@ -32,11 +32,13 @@ def alembic(database: str, *args: str) -> None:
 @pytest.fixture
 async def scratch() -> AsyncIterator[tuple[str, AsyncEngine]]:
     name = f"inquest_migration_{uuid.uuid4().hex[:8]}"
-    url = get_settings().database_url
-    admin = create_async_engine(url, isolation_level="AUTOCOMMIT")
+    settings = get_settings()
+    # Creating databases is administrative; the migration role owns and migrates it (D040).
+    admin = create_async_engine(settings.admin_database_url, isolation_level="AUTOCOMMIT")
     async with admin.connect() as conn:
-        await conn.execute(text(f'CREATE DATABASE "{name}"'))
-    engine = create_async_engine(url.set(database=name))
+        owner = settings.migration_database_url.username
+        await conn.execute(text(f'CREATE DATABASE "{name}" OWNER "{owner}"'))
+    engine = create_async_engine(settings.migration_database_url.set(database=name))
     try:
         yield name, engine
     finally:

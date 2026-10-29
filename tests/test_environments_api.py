@@ -9,7 +9,6 @@ from httpx import AsyncClient
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.main import app
 from src.models import (
     Environment,
     EnvironmentStatus,
@@ -20,6 +19,13 @@ from src.models import (
     ToolCategory,
 )
 from src.schemas.credentials import CredentialStatus, NebiusCredentialsInput, SigNozCredentialsInput
+from tests.credential_fixtures import (
+    KEY_2,
+    allow_process_credentials,
+    configure_credentials,
+    credential_storage,  # noqa: F401
+    store_credentials,
+)
 from tests.records import add_assignment
 from tests.tenancy import Member
 
@@ -65,6 +71,12 @@ def _meta(identity: str, value: str, outcome: str | None, available: str | None)
         "telemetry_available": available,
         "time_range": {"start": "2026-10-21T17:16:00Z", "end": "2026-10-21T17:46:00Z"},
     }
+
+
+@pytest.fixture(autouse=True)
+def grants_permitted(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Environments here that hold an operator grant run on the development credentials.
+    allow_process_credentials(monkeypatch)
 
 
 @pytest.fixture
@@ -293,11 +305,7 @@ async def test_investigations_can_be_listed_per_environment(
     assert [i["id"] for i in body["items"]] == [str(mine.investigation_id)]
 
 
-# --- planned credential contract (not routed) ----------------------------------------------
-
-
-def test_no_endpoint_accepts_credentials_yet():
-    assert not [r.path for r in app.routes if "credential" in getattr(r, "path", "")]
+# --- credential contract (routes: tests/test_credentials_api.py) ----------------------------
 
 
 def test_credential_inputs_never_serialize_secrets():
@@ -308,7 +316,9 @@ def test_credential_inputs_never_serialize_secrets():
     for model in (nebius, signoz):
         assert "secret" not in repr(model)
         assert "secret" not in model.model_dump_json()
-    assert CredentialStatus(kind="nebius", configured=True, updated_at=None, updated_by=None)
+    assert CredentialStatus(
+        kind="nebius", configured=True, state="configured", updated_at=None, updated_by=None
+    )
 
 
 @pytest.mark.parametrize(
@@ -332,3 +342,45 @@ def test_signoz_credential_validation():
         SigNozCredentialsInput(base_url="ftp://signoz", api_key="x" * 16)
     with pytest.raises(ValidationError):
         SigNozCredentialsInput(base_url="https://a:b@signoz", api_key="x" * 16)
+
+
+async def test_detail_reports_own_credentials_without_values(
+    client: AsyncClient,
+    session: AsyncSession,
+    tenant: Member,
+    credential_storage,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+):
+    env = _env(tenant, metadata_json=SCOPE, process_credentials=True)
+    session.add(env)
+    await session.flush()
+    await store_credentials(session, tenant.user_id, env.id)
+
+    response = await client.get(f"/environments/{env.id}")
+    body = response.json()
+    # Own credentials win over the grant (D034); model ids are not secrets.
+    assert body["credentials"] == "environment"
+    assert body["ai_provider"] == {
+        "provider": "nebius_token_factory", "source": "environment", "configured": True,
+        "issues": [], "main_model": "main-A", "local_model": "local-A",
+    }  # fmt: skip
+    assert body["telemetry_provider"]["configured"] is True
+    assert "SENTINEL" not in response.text and "signoz.test" not in response.text
+
+    configure_credentials(monkeypatch, keys={"k2": KEY_2}, active="k2")
+    body = (await client.get(f"/environments/{env.id}")).json()
+    assert body["credentials"] == "unavailable"
+    assert body["ai_provider"]["issues"] == ["credentials_unavailable"]
+    assert body["scope"]["problems"] == []  # an environment that queries nothing
+
+
+async def test_grants_need_the_operator_opt_in_to_count(
+    client: AsyncClient, session: AsyncSession, tenant: Member, monkeypatch: pytest.MonkeyPatch
+):
+    allow_process_credentials(monkeypatch, allowed=False)
+    env = _env(tenant, metadata_json=SCOPE, process_credentials=True)
+    session.add(env)
+    await session.flush()
+    body = (await client.get(f"/environments/{env.id}")).json()
+    assert body["credentials"] == "configuration_required"
+    assert body["telemetry_provider"]["issues"] == ["process_credentials_not_permitted"]

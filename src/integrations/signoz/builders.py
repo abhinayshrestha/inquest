@@ -1,4 +1,6 @@
+import copy
 import math
+import re
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, NamedTuple
@@ -9,6 +11,7 @@ from src.integrations.signoz.schemas import (
     MAX_RAW_POINTS,
     MAX_SERIES,
     MAX_TRACE_SPANS,
+    TENANT_KEY_ATTRIBUTE,
     Condition,
     HostMetric,
     Identity,
@@ -462,3 +465,42 @@ def trace_query(req: TraceRequest, scope: Scope) -> dict[str, Any]:
         "limit": MAX_TRACE_SPANS + 1,
     }
     return envelope(req.time_range, "raw", [builder_query(spec)])
+
+
+# --- provider-scoped isolation (D037) ------------------------------------------------------
+
+# SigNoz Cloud stamps this resource attribute on every record with the id of the ingestion
+# key that sent it; senders cannot set it. A key-scoped role admits a Query Builder query
+# only when its filter pins this attribute at the top level (= or IN), AND-combined.
+TENANT_KEY_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# Formulas read only the builder queries they name, which carry the filter themselves.
+UNFILTERED_TYPES = frozenset({"builder_formula"})
+
+
+def tenant_clause(key_ids: tuple[str, ...]) -> str:
+    if not key_ids or not all(TENANT_KEY_ID.match(k) for k in key_ids):
+        raise ValueError("tenant key ids are missing or malformed")
+    if len(key_ids) == 1:
+        return f"{TENANT_KEY_ATTRIBUTE} = {quote(key_ids[0])}"
+    return f"{TENANT_KEY_ATTRIBUTE} IN (" + ", ".join(map(quote, key_ids)) + ")"
+
+
+def tenant_scoped(body: dict[str, Any], key_ids: tuple[str, ...]) -> dict[str, Any]:
+    """A copy of a query_range body in which every builder query is restricted to the
+    organization's ingestion keys: `<key clause> AND (<its own filter>)`. Any other query
+    type (PromQL, ClickHouse SQL, trace operators, anything new) is refused rather than
+    sent: scoped roles deny them, and nothing here could restrict them."""
+    clause = tenant_clause(key_ids)
+    scoped = copy.deepcopy(body)
+    queries = (scoped.get("compositeQuery") or {}).get("queries")
+    if not isinstance(queries, list) or not queries:
+        raise ValueError("query has no builder queries to scope")
+    for query in queries:
+        kind = query.get("type") if isinstance(query, dict) else None
+        if kind in UNFILTERED_TYPES:
+            continue
+        if kind != "builder_query" or not isinstance(query.get("spec"), dict):
+            raise ValueError(f"query type {kind!r} cannot be restricted to a tenant")
+        own = (query["spec"].get("filter") or {}).get("expression")
+        query["spec"]["filter"] = {"expression": f"{clause} AND ({own})" if own else clause}
+    return scoped

@@ -28,7 +28,11 @@ export function OrganizationSwitcher() {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="outline" size="sm" className="max-w-56 justify-between gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          className="max-w-56 min-w-0 shrink justify-between gap-2"
+        >
           <Building2 aria-hidden />
           <span className="truncate">{label}</span>
           <ChevronsUpDown aria-hidden className="opacity-60" />

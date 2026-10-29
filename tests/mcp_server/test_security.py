@@ -120,14 +120,18 @@ async def test_browser_origin_is_rejected(mcp_app, world: World):
     assert response.status_code == 403
 
 
-async def test_main_app_mounts_the_authenticated_endpoint():
+async def test_the_public_app_does_not_serve_mcp(world: World):
+    """MCP lives on the loopback listener only (D041): the public API answers 404 for
+    every spelling, even with a valid token."""
     from src.main import app
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://localhost"
     ) as client:
-        response = await client.post("/mcp/", json=LIST, headers=JSON_HEADERS)
-    assert response.status_code == 401
+        headers = {**JSON_HEADERS, "authorization": f"Bearer {token_for(world)}"}
+        for path in ("/mcp", "/mcp/", "/MCP/", "/%6dcp/", "//mcp/", "/./mcp/", "/api/mcp/"):
+            response = await client.post(path, json=LIST, headers=headers)
+            assert response.status_code == 404, path
 
 
 # --- binding and isolation ---------------------------------------------------------------

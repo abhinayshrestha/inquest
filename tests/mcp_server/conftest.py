@@ -22,7 +22,8 @@ from src.tools import execute_tool
 from tests.tools.conftest import SETTINGS, World, make_world, replies, world  # noqa: F401
 
 SECRET = "test-secret-" + "x" * 40
-MCP_SETTINGS = McpSettings(token_secret=SECRET, allowed_hosts=["testserver"])
+# Investigator runtimes address the derived loopback URL; direct tests use testserver.
+MCP_SETTINGS = McpSettings(token_secret=SECRET, allowed_hosts=["testserver", "127.0.0.1:*"])
 BASE_URL = "http://testserver"
 
 

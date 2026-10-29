@@ -1,4 +1,4 @@
-import { z } from 'zod'
+import { z } from '@/lib/zod'
 
 // The JSON documents inside turns (answer_json) and reports (report_json). Written by
 // src/investigators/main_graph.py persist (+ services/turns.complete_turn) and shaped by
