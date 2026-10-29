@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { Outlet, useLocation } from 'react-router'
 
+import { AuthErrorBanner } from './auth-error-banner'
 import { Header } from './header'
 import { Sidebar } from './sidebar'
 
@@ -36,6 +37,7 @@ export function AppShell() {
           tabIndex={-1}
           className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 outline-none sm:px-6 lg:px-8"
         >
+          <AuthErrorBanner />
           <Outlet />
         </main>
       </div>

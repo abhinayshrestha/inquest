@@ -26,7 +26,7 @@ from src.db.session import SessionLocal, engine
 from src.mcp_server import McpSettings, mint_assignment_token
 from src.mcp_server.auth import TokenConfigError
 from src.mcp_server.server import IDEMPOTENCY_META_KEY
-from src.models import InvestigationAssignment
+from src.models import Investigation, InvestigationAssignment
 
 # Above the executor's worst case: 20 s SigNoz deadline plus two 10 s database phases.
 READ_TIMEOUT_SECONDS = 60
@@ -35,10 +35,13 @@ READ_TIMEOUT_SECONDS = 60
 async def _token(assignment_id: uuid.UUID) -> str:
     async with SessionLocal() as session:
         assignment = await session.get(InvestigationAssignment, assignment_id)
-    if assignment is None:
+        investigation = assignment and await session.get(Investigation, assignment.investigation_id)
+    if assignment is None or investigation is None:
         fail(f"assignment {assignment_id} not found")
     try:
-        return mint_assignment_token(assignment, McpSettings())
+        return mint_assignment_token(
+            assignment, McpSettings(), organization_id=investigation.organization_id
+        )
     except TokenConfigError as exc:
         fail(str(exc))
     raise AssertionError("unreachable")
@@ -94,7 +97,7 @@ async def call(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--url", default="http://localhost:8000/mcp/")
+    parser.add_argument("--url", default="http://127.0.0.1:8001/")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("tools", help="tools/list as the assignment's investigator")

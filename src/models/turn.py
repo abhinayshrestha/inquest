@@ -115,6 +115,10 @@ class InvestigationTurn(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # model. Derived data: rebuilt when missing, invalid or from an older version.
     presentation_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     error_code: Mapped[str | None] = mapped_column(String(100))
+    # Who asked (NULL for legacy turns and turns created by internal tooling).
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT")
+    )
     # Set when the API accepted the turn for execution. Recovery starts pending turns
     # that have it (accepted, never started) and never ones that lack it (created only).
     run_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

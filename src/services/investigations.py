@@ -1,5 +1,7 @@
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import NamedTuple
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +22,7 @@ from src.models import (
     TurnStatus,
 )
 from src.schemas.investigation import InvestigationCreate
+from src.services import limits
 from src.services.progress import append_progress_event
 
 INITIAL_ROUND = 1
@@ -85,12 +88,42 @@ async def lock_investigation(session: AsyncSession, investigation_id: uuid.UUID)
     return investigation
 
 
-async def create_investigation(session: AsyncSession, data: InvestigationCreate) -> Investigation:
+async def require_daily_quotas(
+    session: AsyncSession, organization_id: uuid.UUID, *, investigation: bool
+) -> None:
+    """QuotaExceeded once the organization created its investigations (when creating one)
+    or turns allowed per day. Holds its quota lock until the transaction ends, so concurrent
+    creations count each other; taken before capacity and row locks."""
+    await limits.lock(session, "organization", organization_id)
+    if investigation:
+        await limits.require_daily(
+            session,
+            "investigations_per_organization_per_day",
+            select(Investigation.created_at).where(
+                Investigation.organization_id == organization_id
+            ),
+        )
+    await limits.require_daily(
+        session,
+        "turns_per_organization_per_day",
+        select(InvestigationTurn.created_at)
+        .join(Investigation, Investigation.id == InvestigationTurn.investigation_id)
+        .where(Investigation.organization_id == organization_id),
+    )
+
+
+async def create_investigation(
+    session: AsyncSession, data: InvestigationCreate, *, created_by: uuid.UUID | None = None
+) -> Investigation:
     """Investigation, its environment scope, turn 1 (the question) and the round-1
-    assignment for that turn, in one transaction."""
+    assignment for that turn, in one transaction. The investigation belongs to the
+    environment's organization (never to one named by the caller); the API checks the
+    caller may use the environment before calling this."""
     environment = await session.get(Environment, data.environment_id)
     if environment is None:
         raise EnvironmentNotFound(data.environment_id)
+    if environment.organization_id is not None:
+        await require_daily_quotas(session, environment.organization_id, investigation=True)
 
     investigation = Investigation(
         title=data.title,
@@ -98,6 +131,8 @@ async def create_investigation(session: AsyncSession, data: InvestigationCreate)
         severity=data.severity,
         status=InvestigationStatus.PENDING,
         trigger_type=TriggerType.MANUAL,
+        organization_id=environment.organization_id,
+        created_by_user_id=created_by if environment.organization_id else None,
     )
     investigation.environments.append(InvestigationEnvironment(environment=environment))
     turn = InvestigationTurn(
@@ -105,6 +140,7 @@ async def create_investigation(session: AsyncSession, data: InvestigationCreate)
         kind=TurnKind.INITIAL,
         question=data.question,
         status=TurnStatus.PENDING,
+        created_by_user_id=created_by,
     )
     investigation.turns.append(turn)
     # Kept until the Main Investigator writes objectives (Phase 3): the initial question
@@ -149,21 +185,80 @@ async def get_investigation(
     )
 
 
+def latest_turns():
+    """(investigation_id, status, completed_at) of each investigation's latest turn."""
+    last = (
+        select(InvestigationTurn.investigation_id, func.max(InvestigationTurn.seq).label("seq"))
+        .group_by(InvestigationTurn.investigation_id)
+        .subquery()
+    )
+    return (
+        select(
+            InvestigationTurn.investigation_id,
+            InvestigationTurn.status,
+            InvestigationTurn.completed_at,
+        )
+        .join(
+            last,
+            (last.c.investigation_id == InvestigationTurn.investigation_id)
+            & (last.c.seq == InvestigationTurn.seq),
+        )
+        .subquery()
+    )
+
+
+class InvestigationPageData(NamedTuple):
+    page: list[Investigation]
+    turn_counts: dict[uuid.UUID, int]
+    latest_reports: dict[uuid.UUID, int]
+    latest_turn: dict[uuid.UUID, tuple[TurnStatus, datetime | None]]
+    has_more: bool
+
+
 async def list_investigations(
-    session: AsyncSession, *, limit: int, offset: int
-) -> tuple[list[Investigation], dict[uuid.UUID, int], dict[uuid.UUID, int], bool]:
-    """Newest first. Returns the page, turn counts, latest report versions and whether
-    more rows follow. Counts come from two grouped queries over the page's ids, so the
-    cost is bounded by the page size, not by history length."""
+    session: AsyncSession,
+    *,
+    organization_id: uuid.UUID,
+    limit: int,
+    offset: int,
+    environment_id: uuid.UUID | None = None,
+    statuses: Sequence[InvestigationStatus] = (),
+    latest_turn_statuses: Sequence[TurnStatus] = (),
+) -> InvestigationPageData:
+    """Newest first, optionally narrowed by environment, investigation status and the
+    status of each investigation's latest turn (failed turns leave the investigation idle,
+    D016, so "failed" is a turn property). Per-row counts come from grouped queries over
+    the page's ids, so the cost is bounded by the page size, not by history length."""
+    query = (
+        select(Investigation)
+        .where(Investigation.organization_id == organization_id)
+        .options(
+            selectinload(Investigation.environments).selectinload(
+                InvestigationEnvironment.environment
+            )
+        )
+    )
+    if environment_id is not None:
+        query = query.where(
+            select(InvestigationEnvironment)
+            .where(
+                InvestigationEnvironment.investigation_id == Investigation.id,
+                InvestigationEnvironment.environment_id == environment_id,
+            )
+            .exists()
+        )
+    if statuses:
+        query = query.where(Investigation.status.in_(statuses))
+    if latest_turn_statuses:
+        latest = latest_turns()
+        query = query.where(
+            Investigation.id.in_(
+                select(latest.c.investigation_id).where(latest.c.status.in_(latest_turn_statuses))
+            )
+        )
     rows = list(
         await session.scalars(
-            select(Investigation)
-            .options(
-                selectinload(Investigation.environments).selectinload(
-                    InvestigationEnvironment.environment
-                )
-            )
-            .order_by(Investigation.created_at.desc(), Investigation.id.desc())
+            query.order_by(Investigation.created_at.desc(), Investigation.id.desc())
             .limit(limit + 1)
             .offset(offset)
         )
@@ -173,6 +268,7 @@ async def list_investigations(
     ids = [i.id for i in page]
     turn_counts: dict[uuid.UUID, int] = {}
     latest_reports: dict[uuid.UUID, int] = {}
+    latest_turn: dict[uuid.UUID, tuple[TurnStatus, datetime | None]] = {}
     if ids:
         turn_counts = dict(
             (
@@ -194,7 +290,14 @@ async def list_investigations(
                 )
             ).all()
         )
-    return page, turn_counts, latest_reports, has_more
+        latest = latest_turns()
+        latest_turn = {
+            investigation_id: (status, completed_at)
+            for investigation_id, status, completed_at in (
+                await session.execute(select(latest).where(latest.c.investigation_id.in_(ids)))
+            ).all()
+        }
+    return InvestigationPageData(page, turn_counts, latest_reports, latest_turn, has_more)
 
 
 async def start_investigation(session: AsyncSession, investigation_id: uuid.UUID) -> Investigation:

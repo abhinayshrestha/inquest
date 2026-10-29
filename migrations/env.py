@@ -7,6 +7,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from src.config import get_settings
+from src.db import privileges
 from src.models import Base
 
 # this is the Alembic Config object, which provides
@@ -33,7 +34,7 @@ def run_migrations_offline() -> None:
     script output.
 
     """
-    url = get_settings().database_url
+    url = get_settings().migration_database_url
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -45,11 +46,26 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+# Commands that change the schema; afterwards the runtime role's privileges are reapplied.
+SCHEMA_COMMANDS = frozenset({"upgrade", "downgrade", "stamp"})
+
+
 def do_run_migrations(connection: Connection) -> None:
+    runtime = get_settings().inquest_db_user
+    current = connection.exec_driver_sql("SELECT current_user").scalar()
+    connection.commit()
+    if runtime and current == runtime:
+        # It would fail on the first DDL anyway; say why (D040).
+        raise RuntimeError("Alembic must run as the migration role, not the runtime role")
     context.configure(connection=connection, target_metadata=target_metadata)
 
     with context.begin_transaction():
         context.run_migrations()
+        command = getattr(config.cmd_opts, "cmd", None)
+        if runtime and command and command[0].__name__ in SCHEMA_COMMANDS:
+            # Default privileges cover new tables; this applies the matrix's exceptions
+            # (e.g. append-only audit rows) to them as well.
+            privileges.apply_runtime_grants(connection, runtime)
 
 
 async def run_async_migrations() -> None:
@@ -58,7 +74,9 @@ async def run_async_migrations() -> None:
 
     """
 
-    connectable = create_async_engine(get_settings().database_url, poolclass=pool.NullPool)
+    connectable = create_async_engine(
+        get_settings().migration_database_url, poolclass=pool.NullPool
+    )
 
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)

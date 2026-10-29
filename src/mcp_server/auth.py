@@ -2,11 +2,14 @@
 
 The orchestrator mints one token per running assignment and hands it to that assignment's
 investigator runtime (never to the model, never into graph state). The token is the only
-source of investigation, assignment and environment IDs for MCP tool calls. Revocation is
-the assignment leaving `running`: the executor re-checks that under a row lock on every
-call, so an unexpired token for a closed assignment can run nothing.
+source of organization, investigation, assignment and environment IDs for MCP tool
+calls. Revocation is the assignment leaving `running`: the executor re-checks that, and
+the token's organization against the assignment's rows, under a row lock on every call,
+so an unexpired token for a closed or foreign assignment can run nothing.
 """
 
+import base64
+import binascii
 import logging
 import time
 import uuid
@@ -27,7 +30,15 @@ AUDIENCE = "inquest-mcp"
 INVESTIGATE_SCOPE = "inquest:investigate"
 ALGORITHM = "HS256"
 MIN_SECRET_CHARS = 32
-REQUIRED_CLAIMS = ["iss", "aud", "sub", "exp", "iat", "jti", "scope", "inv", "env"]
+# Hosted deployments: the secret must be at least this many random bytes, base64-encoded
+# (`openssl rand -base64 48`), so it cannot be a guessable passphrase (audit M1).
+MIN_SECRET_BYTES = 32
+# The MCP listener is private to the process's host: investigators run in-process (D010)
+# and nothing else may reach it, so it never binds anything but loopback (D041).
+LISTEN_HOST = "127.0.0.1"
+REQUIRED_CLAIMS = ["iss", "aud", "sub", "exp", "iat", "jti", "scope", "inv", "env", "org"]
+# The "org" claim of an ownerless legacy assignment (D032): host-side tooling only.
+NO_ORGANIZATION = "legacy"
 
 
 class McpSettings(BaseSettings):
@@ -42,8 +53,14 @@ class McpSettings(BaseSettings):
     token_ttl_seconds: int = Field(default=900, gt=0, le=3600)
     # Host header allowlist (DNS rebinding protection); "host:*" allows any port.
     allowed_hosts: list[str] = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
-    # Where investigator runtimes reach this server: loopback into the same backend (D010).
-    url: str = "http://127.0.0.1:8000/mcp/"
+    # The private listener's port on LISTEN_HOST; the public API listener never serves MCP.
+    port: int = Field(default=8001, ge=1, le=65535)
+
+    @property
+    def url(self) -> str:
+        """Where investigator runtimes reach this server: loopback into the same process.
+        Derived, not configured, so it cannot point at the public listener."""
+        return f"http://{LISTEN_HOST}:{self.port}/"
 
 
 class TokenConfigError(Exception):
@@ -58,10 +75,34 @@ def _secret(settings: McpSettings) -> str:
     return secret
 
 
+def secret_problem(settings: McpSettings) -> str | None:
+    """Why the secret is unfit for a hosted deployment, or None. Never includes the value."""
+    secret = settings.token_secret.get_secret_value() if settings.token_secret else ""
+    if not secret:
+        return "MCP_TOKEN_SECRET is not set"
+    try:
+        raw = base64.b64decode(secret, validate=True)
+    except (binascii.Error, ValueError):
+        raw = b""
+    # Repetition or a short alphabet means it was typed, not generated.
+    if len(raw) < MIN_SECRET_BYTES or len(set(raw)) < MIN_SECRET_BYTES // 2:
+        return (
+            f"MCP_TOKEN_SECRET must be at least {MIN_SECRET_BYTES} random bytes, base64-encoded "
+            "(openssl rand -base64 48)"
+        )
+    return None
+
+
 def mint_assignment_token(
-    assignment: InvestigationAssignment, settings: McpSettings, *, ttl_seconds: int | None = None
+    assignment: InvestigationAssignment,
+    settings: McpSettings,
+    *,
+    organization_id: uuid.UUID | None,
+    ttl_seconds: int | None = None,
 ) -> str:
-    """For the orchestrator, when it launches an investigator. Not reachable over HTTP."""
+    """For the orchestrator, when it launches an investigator. Not reachable over HTTP.
+    `organization_id` must come from the assignment's investigation and environment rows;
+    the executor compares it with them again on every call."""
     now = int(time.time())
     claims = {
         "iss": ISSUER,
@@ -69,6 +110,7 @@ def mint_assignment_token(
         "sub": str(assignment.id),
         "inv": str(assignment.investigation_id),
         "env": str(assignment.environment_id),
+        "org": str(organization_id) if organization_id else NO_ORGANIZATION,
         "scope": INVESTIGATE_SCOPE,
         "iat": now,
         "exp": now + (ttl_seconds or settings.token_ttl_seconds),
@@ -92,6 +134,9 @@ def _decode(token: str, secret: str) -> dict[str, Any] | None:
             "investigation_id": uuid.UUID(claims["inv"]),
             "assignment_id": uuid.UUID(claims["sub"]),
             "environment_id": uuid.UUID(claims["env"]),
+            "organization_id": (
+                None if claims["org"] == NO_ORGANIZATION else uuid.UUID(claims["org"])
+            ),
         }
     except (jwt.PyJWTError, ValueError, TypeError, AttributeError):
         return None
@@ -122,5 +167,8 @@ class AssignmentTokenVerifier:
             scopes=[scope] if isinstance(scope, str) else [],
             expires_at=int(claims["exp"]),
             subject=str(claims["assignment_id"]),
-            claims={k: claims[k] for k in ("investigation_id", "assignment_id", "environment_id")},
+            claims={
+                k: claims[k]
+                for k in ("investigation_id", "assignment_id", "environment_id", "organization_id")
+            },
         )

@@ -22,6 +22,9 @@ export function InvestigationRow({ item }: { item: InvestigationListItem }) {
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-3">
+          {(item.latest_turn_status === 'failed' || item.latest_turn_status === 'cancelled') && (
+            <span className="text-xs text-warning">Last question {item.latest_turn_status}</span>
+          )}
           {item.latest_report_version !== null && (
             <span className="flex items-center gap-1 text-xs text-muted-foreground">
               <FileText aria-hidden className="size-3.5" />v{item.latest_report_version}

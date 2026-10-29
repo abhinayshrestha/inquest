@@ -18,7 +18,6 @@ import logging
 import time
 import uuid
 from typing import Any
-from urllib.parse import urlsplit
 
 import httpx
 from langchain_core.callbacks import AsyncCallbackHandler
@@ -26,6 +25,7 @@ from sqlalchemy import select
 
 from scripts.test_tool_executor import emit, fail
 from src.config import get_settings
+from src.credentials import resolver
 from src.db.session import SessionLocal, engine
 from src.investigators.checkpoint import open_checkpointer
 from src.investigators.llm import NebiusConfigError, load_nebius_settings, local_model
@@ -34,11 +34,13 @@ from src.investigators.refs import ref
 from src.mcp_server import McpSettings
 from src.mcp_server.auth import MIN_SECRET_CHARS
 from src.models import (
+    Environment,
     Evidence,
     Finding,
     FindingEvidence,
     Hypothesis,
     HypothesisEvidence,
+    InvestigationAssignment,
     ToolCall,
 )
 
@@ -96,17 +98,15 @@ async def check(_: argparse.Namespace) -> None:
         if len(secret) >= MIN_SECRET_CHARS
         else f"MCP_TOKEN_SECRET needs {MIN_SECRET_CHARS}+ chars"
     )
-    parts = urlsplit(mcp.url)
     report["mcp_url"] = mcp.url
     try:
+        # The private MCP listener (started by the backend) answers 401 without a token.
         async with httpx.AsyncClient(timeout=5) as client:
-            health = await client.get(f"{parts.scheme}://{parts.netloc}/health")
-        report["backend_health"] = (
-            health.json() if health.status_code == 200 else health.status_code
-        )
+            probe = await client.post(mcp.url, json={})
+        report["mcp_listener"] = "ok" if probe.status_code == 401 else probe.status_code
     except httpx.HTTPError as exc:
-        report["backend_health"] = (
-            f"unreachable ({type(exc).__name__}); start it with: uv run poe dev"
+        report["mcp_listener"] = (
+            f"unreachable ({type(exc).__name__}); start the backend with: uv run poe dev"
         )
     emit(report)
 
@@ -187,6 +187,19 @@ async def records(assignment_id: uuid.UUID) -> dict[str, Any]:
 
 
 async def run(args: argparse.Namespace) -> None:
+    # The model below uses the process-wide .env key: never for an environment that has
+    # credentials of its own (D034).
+    async with SessionLocal() as s:
+        assignment = await s.get(InvestigationAssignment, args.assignment_id)
+        environment = assignment and await s.get(Environment, assignment.environment_id)
+        if environment is None:
+            fail("assignment not found")
+        try:
+            source = (await resolver.environment_credentials(s, environment)).source
+        except resolver.CredentialRefused as exc:
+            fail(f"refused: {exc.code}")
+    if source != "process":
+        fail("this environment uses its own credentials; run it through the API")
     log = ModelCallLog()
     try:
         model = local_model().model_copy(update={"callbacks": [log]})

@@ -1,0 +1,150 @@
+# Inquest's public boundary (D041, docs/deployment.md). nginx's image renders this file
+# into conf.d at start, substituting only:
+#   INQUEST_SERVER_NAME  the public host name (certificate name, OIDC redirect host)
+#   INQUEST_UPSTREAM     the API listener, host:port on the private application network
+# TLS material is mounted at /etc/nginx/tls/{fullchain,privkey}.pem.
+#
+# Only two things are public: the built frontend and /api/* (the API, minus /api/mcp).
+# MCP is not served by the API listener at all; it has a loopback-only listener inside
+# the application container, which nothing here can address.
+
+server_tokens off;
+
+# Bounds on what one client may send and how slowly. The application repeats the body
+# limit (INQUEST_MAX_REQUEST_BYTES, 413) and its own per-address, user and organization
+# limits (D039); these are the outer layer, keyed by the real peer address.
+client_max_body_size 128k;
+client_body_buffer_size 128k;
+client_header_buffer_size 1k;
+large_client_header_buffers 4 16k;
+client_header_timeout 10s;
+client_body_timeout 10s;
+send_timeout 30s;
+reset_timedout_connection on;
+
+limit_req_zone $binary_remote_addr zone=inquest_api:10m rate=20r/s;
+limit_conn_zone $binary_remote_addr zone=inquest_conn:10m;
+limit_req_status 429;
+limit_conn_status 429;
+
+upstream inquest_api {
+    server ${INQUEST_UPSTREAM};
+    keepalive 16;
+    # Below uvicorn's 5 s keep-alive, so nginx never reuses a connection it is closing.
+    keepalive_timeout 4s;
+}
+
+# Plain HTTP only redirects (to the one configured name, never the request's Host) and
+# answers the container health check.
+server {
+    listen 80 default_server;
+    server_name _;
+
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+    location / {
+        return 301 https://${INQUEST_SERVER_NAME}$request_uri;
+    }
+}
+
+# Any other name (direct IP access, scanners, a forged Host or SNI) gets no certificate
+# and no response.
+server {
+    listen 443 ssl default_server;
+    ssl_reject_handshake on;
+    return 421;
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name ${INQUEST_SERVER_NAME};
+
+    ssl_certificate /etc/nginx/tls/fullchain.pem;
+    ssl_certificate_key /etc/nginx/tls/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:inquest_tls:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    # (Server level: the image's nginx.conf already sets one for http.)
+    keepalive_timeout 30s;
+    limit_conn inquest_conn 32;
+
+    # Server-level headers apply to every response here, including errors ("always"), as
+    # long as no location adds headers of its own (nginx would then drop these): locations
+    # below use `expires`, never add_header.
+    # HSTS without includeSubDomains or preload: those commit sibling hosts and are the
+    # operator's decision (docs/deployment.md).
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    # The React build loads only its own scripts, styles and fonts and talks only to this
+    # origin. 'unsafe-inline' for styles only: Radix UI injects <style> elements; inline
+    # scripts stay forbidden (the theme bootstrap is /theme.js).
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "same-origin" always;
+    add_header Cross-Origin-Opener-Policy "same-origin" always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()" always;
+
+    # Forwarded identity is set here, never passed through: X-Forwarded-For is replaced
+    # by the peer address (uvicorn trusts it only from this proxy, INQUEST_TRUSTED_PROXIES),
+    # and headers the application never reads are emptied so nothing downstream can.
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Forwarded-Host "";
+    proxy_set_header X-Forwarded-Port "";
+    proxy_set_header X-Real-IP "";
+    proxy_set_header Forwarded "";
+    proxy_connect_timeout 5s;
+    proxy_send_timeout 30s;
+    # Credential validation has a 60 s deadline in the application.
+    proxy_read_timeout 75s;
+    proxy_buffer_size 16k;
+    proxy_buffers 8 16k;
+
+    # MCP is never public. Locations match the normalized path (%XX decoded, dot segments
+    # resolved, slashes merged), case-insensitively here, so no spelling reaches the API
+    # (which has no such route anyway).
+    location ~* ^/api/+mcp(/|$) {
+        return 404;
+    }
+
+    # Investigation progress (SSE): unbuffered, and open as long as the client stays.
+    # Keep-alive comments every 15 s keep the read timeout from firing; Last-Event-ID
+    # replay is a request header and passes through unchanged.
+    location ~ ^/api/investigations/[^/]+/events$ {
+        limit_req zone=inquest_api burst=40 nodelay;
+        proxy_pass http://inquest_api;
+        rewrite ^/api(/.*)$ $1 break;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 1h;
+    }
+
+    # The API, without its /api prefix. A URI in proxy_pass forwards the normalized path
+    # nginx matched above, not the raw request line.
+    location /api/ {
+        limit_req zone=inquest_api burst=40 nodelay;
+        proxy_pass http://inquest_api/;
+    }
+
+    # The frontend: hashed assets cached for good, everything else revalidated so a
+    # deployment takes effect; unknown paths are client-side routes.
+    root /usr/share/nginx/html;
+    location /assets/ {
+        expires max;
+        try_files $uri =404;
+    }
+    location / {
+        expires -1;
+        try_files $uri /index.html;
+    }
+}

@@ -13,6 +13,14 @@ export const ENV = {
   status: 'active',
 } as const
 
+// GET /environments rows carry activity counts (EnvironmentListItem).
+export const ENV_ITEM = {
+  ...ENV,
+  created_at: '2026-10-17T10:00:00Z',
+  investigation_count: 3,
+  last_investigation_at: '2026-10-21T17:30:00Z',
+}
+
 const assignment = (id: string, turnId: string, round: number, status = 'completed') => ({
   id,
   turn_id: turnId,
@@ -92,8 +100,12 @@ const report1 = {
   created_at: '2026-10-21T17:31:34Z',
 }
 
+// The organization tests are signed in to (test/render.tsx TEST_ORGANIZATION).
+export const ORGANIZATION_ID = '00000000-0000-4000-8000-0000000000f2'
+
 export const investigation = {
   id: INVESTIGATION_ID,
+  organization_id: ORGANIZATION_ID,
   title: 'API latency on /slow',
   question: 'Why is my API slow?',
   status: 'idle',
@@ -155,6 +167,36 @@ export const listItem = {
   environments: [ENV],
   turn_count: 1,
   latest_report_version: 1,
+  latest_turn_status: 'completed',
+  latest_turn_completed_at: '2026-10-21T17:31:34Z',
+}
+
+// GET /overview, shaped like the dev database at the time of Phase 6E.
+export const overviewCounts = {
+  investigations_total: 11,
+  investigations_by_status: { pending: 0, investigating: 1, correlating: 0, idle: 10, completed: 0, failed: 0, cancelled: 0 },
+  latest_turn_by_status: { pending: 0, running: 1, completed: 3, failed: 2, cancelled: 5 },
+  turns_total: 17,
+  turns_by_status: { pending: 0, running: 1, completed: 9, failed: 2, cancelled: 5 },
+  environments_total: 1,
+  environments_active: 1,
+  reports_total: 5,
+  investigations_with_reports: 3,
+} // prettier-ignore
+
+export const reportListItem = {
+  id: '5e6f7a8b-5555-4c4c-8d8d-0123456789ab',
+  investigation_id: INVESTIGATION_ID,
+  investigation_title: 'API latency on /slow',
+  investigation_status: 'idle',
+  environments: [ENV],
+  version: 2,
+  is_latest: true,
+  turn_id: TURN_2,
+  turn_seq: 2,
+  created_at: '2026-10-21T17:50:00Z',
+  outcome: 'inconclusive',
+  conclusion_count: 3,
 }
 
 export const evidenceCitation = {

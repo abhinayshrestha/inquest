@@ -1,0 +1,12 @@
+# Test only: the mock identity provider at https://oidc.test, behind the same proxy.
+server {
+    listen 443 ssl;
+    server_name oidc.test;
+    ssl_certificate /etc/nginx/tls/fullchain.pem;
+    ssl_certificate_key /etc/nginx/tls/privkey.pem;
+    location / {
+        proxy_pass http://oidc:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+}

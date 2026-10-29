@@ -1,6 +1,6 @@
 import { ArrowLeft, Loader2, Server } from 'lucide-react'
 import { useId, useState, type FormEvent } from 'react'
-import { Link, useNavigate } from 'react-router'
+import { Link, useNavigate, useSearchParams } from 'react-router'
 
 import { EmptyState } from '@/components/empty-state'
 import { ErrorState } from '@/components/error-state'
@@ -22,17 +22,20 @@ const SELECT =
 
 export default function NewInvestigationPage() {
   const navigate = useNavigate()
+  // Started from an environment page: that environment is preselected if it is active.
+  const [params] = useSearchParams()
   const environments = useEnvironments()
   const create = useCreateInvestigation()
   const ids = { env: useId(), title: useId(), question: useId(), severity: useId(), error: useId() }
-  const [environmentId, setEnvironmentId] = useState('')
+  const [environmentId, setEnvironmentId] = useState(params.get('environment') ?? '')
   const [title, setTitle] = useState('')
   const [question, setQuestion] = useState('')
   const [severity, setSeverity] = useState<Severity | ''>('')
   const [invalid, setInvalid] = useState<string | null>(null)
 
   const active = (environments.data ?? []).filter((e) => e.status === 'active')
-  const selected = environmentId || (active.length === 1 ? active[0]!.id : '')
+  const requested = active.some((e) => e.id === environmentId) ? environmentId : ''
+  const selected = requested || (active.length === 1 ? active[0]!.id : '')
 
   async function submit(event: FormEvent) {
     event.preventDefault()

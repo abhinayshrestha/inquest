@@ -28,6 +28,7 @@ from scripts.run_local_investigator import ModelCallLog
 from scripts.run_local_investigator import check as local_check
 from scripts.test_tool_executor import emit, fail
 from src.config import get_settings
+from src.credentials import resolver
 from src.db.session import SessionLocal, engine
 from src.investigators.checkpoint import open_checkpointer
 from src.investigators.llm import NebiusConfigError, local_model, main_model
@@ -174,6 +175,15 @@ async def ask(args: argparse.Namespace) -> None:
 async def _run(
     investigation_id: uuid.UUID, turn_id: uuid.UUID, *, tool_calls_before: int | None = None
 ) -> None:
+    # The models below use the process-wide .env key: never for an environment that has
+    # credentials of its own (D034).
+    async with SessionLocal() as s:
+        try:
+            source = (await resolver.investigation_credentials(s, investigation_id)).source
+        except resolver.CredentialRefused as exc:
+            fail(f"refused: {exc.code}")
+    if source != "process":
+        fail("this investigation uses its environment's own credentials; run it through the API")
     main_log, local_log = ModelCallLog(), ModelCallLog()
     try:
         main = main_model().model_copy(update={"callbacks": [main_log]})

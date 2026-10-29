@@ -11,6 +11,7 @@ const STREAM_LABEL: Record<StreamStatus, string> = {
   open: 'Live activity connected',
   reconnecting: 'Reconnecting to live activity…',
   closed: 'Live activity disconnected',
+  revoked: 'Live activity ended: your session or access ended',
 }
 
 export function InvestigationDetails({

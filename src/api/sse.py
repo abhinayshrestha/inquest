@@ -18,6 +18,10 @@ from src.services.progress import list_progress_events
 
 POLL_SECONDS = 0.5
 KEEPALIVE_SECONDS = 15.0
+# How long a stream with nothing to send can outlive its access (revoked or expired
+# session, withdrawn admission, disabled user, removed membership), plus one poll. Events
+# never wait for it: each batch is authorized after it is read (D043).
+RECHECK_SECONDS = 5.0
 BATCH = 200
 # Client reconnect delay, in milliseconds.
 RETRY_MS = 3000
@@ -54,18 +58,28 @@ async def event_stream(
     after: int,
     follow: bool,
     is_disconnected: Callable[[], Awaitable[bool]],
+    still_allowed: Callable[[], Awaitable[bool]] | None = None,
 ) -> AsyncIterator[str]:
     yield f"retry: {RETRY_MS}\n\n"
     cursor = after
-    quiet_since = time.monotonic()
+    quiet_since = checked = time.monotonic()
     while True:
         if await is_disconnected():
             return
         async with SessionLocal() as s:
             events = await list_progress_events(s, investigation_id, after_id=cursor, limit=BATCH)
-        for event in events:
-            cursor = event.id
-            yield format_event(event)
+        # Checked after reading, so an event is only sent once access was confirmed after it
+        # was read; an idle stream is checked every RECHECK_SECONDS.
+        if still_allowed is not None and (events or time.monotonic() - checked >= RECHECK_SECONDS):
+            if not await still_allowed():
+                # A distinct event so the browser closes instead of reconnecting.
+                yield 'event: access_revoked\ndata: {"reason": "access_revoked"}\n\n'
+                return
+            checked = time.monotonic()
+        if events:
+            # One write per authorized batch: each check covers exactly what is sent.
+            cursor = events[-1].id
+            yield "".join(format_event(event) for event in events)
         if len(events) == BATCH:
             continue  # more history to replay before waiting
         if not follow:

@@ -7,17 +7,22 @@ requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.20.0",
     "fastapi>=0.143.1",
-    "httpx>=0.28.1",
+    # httpx/httpcore are pinned to the minor versions whose private connection-pool
+    # attribute (_pool._network_backend) src/credentials/network.py replaces for the SSRF
+    # guard; re-run tests/test_credentials_network.py before widening either range.
+    "httpx>=0.28.1,<0.29",
     "langchain-openai>=1.7.2",
     "langgraph>=1.2.16",
     "langgraph-checkpoint-postgres>=3.2.0",
     "mcp>=2,<3",
     "psycopg[binary]>=3.2",
-    "pydantic>=2",
+    "pydantic[email]>=2",
     "pydantic-settings>=2.16.0",
-    "pyjwt>=2.10",
+    "pyjwt[crypto]>=2.10",
     "sqlalchemy[asyncio]>=2.0",
     "uvicorn[standard]>=0.54.0",
+    "cryptography>=45",
+    "httpcore>=1.0.9,<1.1",
 ]
 
 [dependency-groups]
@@ -30,7 +35,8 @@ dev = [
 
 [tool.poe.tasks]
 dev = "uvicorn src.main:app --reload"
-start = "uvicorn src.main:app --host 0.0.0.0 --port 8000"
+# Hosted entrypoint (D041): loopback by default, validated proxy trust, one worker.
+start = "python -m src.serve"
 test = "pytest"
 lint = "ruff check ."
 format = "ruff format ."

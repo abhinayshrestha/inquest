@@ -1,4 +1,4 @@
-import { z } from 'zod'
+import { z } from '@/lib/zod'
 
 // Mirrors the FastAPI response models in src/schemas/ and the enums in src/models/.
 // Change these only after the backend contract changes; never add fields the backend
@@ -45,6 +45,8 @@ export const environmentSummary = z.object({
 })
 
 export const environmentRead = environmentSummary.extend({
+  organization_id: id.nullable(),
+  owner_user_id: id.nullable(),
   metadata_json: json,
   created_at: timestamp,
   updated_at: timestamp,
@@ -88,6 +90,7 @@ export const reportRead = reportRef.extend({ report_json: json })
 
 export const investigationRead = z.object({
   id,
+  organization_id: id.nullable(),
   title: z.string(),
   question: z.string(),
   status: investigationStatus,
@@ -143,6 +146,8 @@ export const investigationListItem = z.object({
   environments: z.array(environmentSummary),
   turn_count: z.int(),
   latest_report_version: z.int().nullable(),
+  latest_turn_status: turnStatus.nullable(),
+  latest_turn_completed_at: timestamp.nullable(),
 })
 
 export const investigationPage = z.object({
@@ -150,7 +155,74 @@ export const investigationPage = z.object({
   next_offset: z.int().nullable(),
 })
 
-export const environmentList = z.array(environmentSummary)
+export const environmentListItem = environmentSummary.extend({
+  created_at: timestamp,
+  investigation_count: z.int(),
+  last_investigation_at: timestamp.nullable(),
+})
+
+export const environmentList = z.array(environmentListItem)
+
+// GET /environments/{id} (src/schemas/environment.py EnvironmentDetail).
+const providerStatus = z.object({
+  provider: z.string(),
+  // process_environment: the backend's development settings (operator grant only);
+  // environment: this environment's own credentials (D034).
+  source: z.enum(['process_environment', 'environment']),
+  configured: z.boolean(),
+  issues: z.array(z.string()),
+})
+
+export const environmentDetail = environmentSummary.extend({
+  created_at: timestamp,
+  updated_at: timestamp,
+  organization_id: id.nullable(),
+  owner_user_id: id.nullable(),
+  credentials: z.enum([
+    'environment',
+    'process_development',
+    'configuration_required',
+    'unavailable',
+  ]),
+  scope: z.object({
+    status: z.enum(['configured', 'missing', 'invalid']),
+    hosts: z.array(z.string()),
+    services: z.array(z.string()),
+    deployment_environment: z.string().nullable(),
+    problems: z.array(z.object({ code: z.string(), message: z.string() })),
+  }),
+  stats: z.object({
+    investigations: z.int(),
+    active_investigations: z.int(),
+    evidence: z.int(),
+    tool_calls: z.int(),
+    last_investigation_at: timestamp.nullable(),
+  }),
+  telemetry_provider: providerStatus,
+  ai_provider: providerStatus.extend({
+    main_model: z.string().nullable(),
+    local_model: z.string().nullable(),
+  }),
+  per_environment_credentials: z.literal('not_available'),
+})
+
+// GET /environments/{id}/telemetry: recorded by investigations, not a live check.
+export const telemetryCoverage = z.object({
+  signals: z.array(
+    z.object({
+      signal: z.enum(['metrics', 'logs', 'traces']),
+      identity: z.string(),
+      value: z.string(),
+      status: z.enum(['observed', 'no_data', 'unknown']),
+      window_start: timestamp.nullable(),
+      window_end: timestamp.nullable(),
+      checked_at: timestamp,
+      investigation_id: id,
+    }),
+  ),
+  queries_checked: z.int(),
+  queries_failed: z.int(),
+})
 
 // GET /investigations/{id}/citations/{ref}: recorded summaries and metadata only.
 const citationBase = { ref: z.string(), environment: environmentSummary }
@@ -198,8 +270,46 @@ export const citation = z.discriminatedUnion('kind', [
   hypothesisCitation,
 ])
 
+// GET /overview: counts of stored records only (no health, alerts or uptime).
+export const overviewCounts = z.object({
+  investigations_total: z.int(),
+  investigations_by_status: z.record(investigationStatus, z.int()),
+  latest_turn_by_status: z.record(turnStatus, z.int()),
+  turns_total: z.int(),
+  turns_by_status: z.record(turnStatus, z.int()),
+  environments_total: z.int(),
+  environments_active: z.int(),
+  reports_total: z.int(),
+  investigations_with_reports: z.int(),
+})
+
+export const reportOutcome = z.enum(['root_cause_identified', 'probable_cause', 'inconclusive'])
+
+// GET /reports: report versions across investigations (metadata only).
+export const reportListItem = z.object({
+  id,
+  investigation_id: id,
+  investigation_title: z.string(),
+  investigation_status: investigationStatus,
+  environments: z.array(environmentSummary),
+  version: z.int(),
+  is_latest: z.boolean(),
+  turn_id: id,
+  turn_seq: z.int(),
+  created_at: timestamp,
+  outcome: reportOutcome.nullable(),
+  conclusion_count: z.int(),
+})
+
+export const reportListPage = z.object({
+  items: z.array(reportListItem),
+  next_offset: z.int().nullable(),
+})
+
 // Request bodies (src/schemas/*.py).
 export const environmentCreate = z.object({
+  // Selects one of the caller's organizations; the server checks membership.
+  organization_id: id,
   name: z.string().min(1).max(255),
   type: environmentType,
   metadata_json: json.optional(),
@@ -208,7 +318,7 @@ export const environmentCreate = z.object({
 export const investigationCreate = z.object({
   environment_id: id,
   title: z.string().min(1).max(255),
-  question: z.string().min(1),
+  question: z.string().min(1).max(10_000),
   severity: severity.nullable().optional(),
 })
 
@@ -219,6 +329,9 @@ export type EnvironmentType = z.infer<typeof environmentType>
 export type EnvironmentStatus = z.infer<typeof environmentStatus>
 export type EnvironmentSummary = z.infer<typeof environmentSummary>
 export type EnvironmentRead = z.infer<typeof environmentRead>
+export type EnvironmentListItem = z.infer<typeof environmentListItem>
+export type EnvironmentDetail = z.infer<typeof environmentDetail>
+export type TelemetryCoverage = z.infer<typeof telemetryCoverage>
 export type InvestigationStatus = z.infer<typeof investigationStatus>
 export type Severity = z.infer<typeof severity>
 export type AssignmentStatus = z.infer<typeof assignmentStatus>
@@ -241,3 +354,7 @@ export type EvidenceCitation = z.infer<typeof evidenceCitation>
 export type FindingCitation = z.infer<typeof findingCitation>
 export type HypothesisCitation = z.infer<typeof hypothesisCitation>
 export type Citation = z.infer<typeof citation>
+export type OverviewCounts = z.infer<typeof overviewCounts>
+export type ReportOutcome = z.infer<typeof reportOutcome>
+export type ReportListItem = z.infer<typeof reportListItem>
+export type ReportListPage = z.infer<typeof reportListPage>

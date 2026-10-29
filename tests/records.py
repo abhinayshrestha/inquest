@@ -25,17 +25,21 @@ async def add_assignment(
     *,
     investigation: Investigation | None = None,
     environment: Environment | None = None,
+    tenant: Any = None,
     **fields: Any,
 ) -> InvestigationAssignment:
     """Reuses the investigation's turn 1 and an existing scope row when there are any;
-    otherwise creates them. Adds to the session without flushing."""
+    otherwise creates them, ownerless or in `tenant`'s organization (a tests.tenancy
+    Member). Adds to the session without flushing."""
+    owns = tenant.owns if tenant is not None else {}
     investigation = investigation or Investigation(
         title="API latency spike",
         question="Why did /checkout p99 latency spike?",
         trigger_type=TriggerType.MANUAL,
+        organization_id=owns.get("organization_id"),
     )
     environment = environment or Environment(
-        name=f"env-{uuid.uuid4().hex[:8]}", type=EnvironmentType.LOCAL
+        name=f"env-{uuid.uuid4().hex[:8]}", type=EnvironmentType.LOCAL, **owns
     )
     turn, scoped = None, False
     if inspect(investigation).persistent:

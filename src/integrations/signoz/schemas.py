@@ -47,6 +47,8 @@ IDENTITY_KEYS: dict[str, str] = {"host": "host.name", "service": "service.name"}
 DEPLOYMENT_ENVIRONMENT_KEY = "deployment.environment"
 # Identity is chosen through typed fields and the trusted Scope, never through conditions.
 PROTECTED_KEYS = frozenset({*IDENTITY_KEYS.values(), DEPLOYMENT_ENVIRONMENT_KEY})
+# The ingestion key attribute of SigNoz Cloud (builders.TENANT_KEY_ATTRIBUTE).
+TENANT_KEY_ATTRIBUTE = "signoz.workspace.key.id"
 # Filter-grammar keywords; a key spelled like one could change how the expression parses.
 RESERVED_WORDS = frozenset(
     {
@@ -84,6 +86,9 @@ class Condition(_Request):
             raise ValueError(
                 f"condition key {self.key!r} is an identity key; use the host/service fields"
             )
+        if self.key.lower() == TENANT_KEY_ATTRIBUTE:
+            # Set by trusted code only (provider-scoped connections, D037).
+            raise ValueError(f"condition key {self.key!r} is not available")
         value = self.value
         if self.op in ("exists", "not_exists"):
             ok = value is None

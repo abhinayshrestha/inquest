@@ -4,6 +4,7 @@ from typing import Any
 
 import httpx
 
+from src.integrations.signoz.builders import tenant_scoped
 from src.integrations.signoz.errors import SigNozError, SigNozErrorCode
 from src.integrations.signoz.settings import SigNozSettings
 
@@ -43,6 +44,8 @@ def _status_error(status: int, payload: Any, settings: SigNozSettings) -> SigNoz
     detail = sanitize(_server_error_detail(payload), settings)
     if status in (401, 403):
         code = SigNozErrorCode.AUTH
+        # Authorization errors name service accounts, roles and ingestion key ids.
+        detail = "not authorized"
     elif status == 429 or status >= 500:
         code = SigNozErrorCode.UNAVAILABLE
     elif 300 <= status < 400:
@@ -101,6 +104,12 @@ async def request_json(
     """Returns the parsed JSON body of a 2xx response or raises SigNozError."""
     if (method, path) not in ALLOWED_REQUESTS:
         raise SigNozError(SigNozErrorCode.CONFIG, f"{method} {path} is not an allowed request")
+    if settings.tenant_key_ids and path == QUERY_RANGE_PATH:
+        # Every query of a provider-scoped connection, whatever built it (D037).
+        try:
+            body = tenant_scoped(body or {}, settings.tenant_key_ids)
+        except ValueError as exc:
+            raise SigNozError(SigNozErrorCode.CONFIG, str(exc)) from None
 
     try:
         if client is None:

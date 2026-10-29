@@ -2,22 +2,30 @@ import { API_BASE, request } from './client'
 import { presentationEnvelope } from './presentation'
 import {
   citation,
+  environmentDetail,
   environmentList,
   environmentRead,
   healthResponse,
   investigationPage,
   investigationRead,
+  overviewCounts,
+  reportListPage,
   reportRead,
+  telemetryCoverage,
   turnAccepted,
   turnCancelled,
   type EnvironmentCreate,
+  type InvestigationStatus,
+  type ReportOutcome,
+  type TurnStatus,
   type FollowUpCreate,
   type InvestigationCreate,
 } from './schemas'
 
-// One function per existing FastAPI route (src/api/routes/). Endpoints the backend does
-// not have (environment read, organizations, ...) are deliberately absent; pages show
-// "not available yet" states instead.
+// One function per existing FastAPI route (src/api/routes/). Collections take the selected
+// organization; the backend checks the session's membership on every request (D033), so
+// this is a selector, never an authorization input. Credentials: lib/api/credentials.ts;
+// ownership transfers: lib/api/transfers.ts.
 
 type Options = { signal?: AbortSignal }
 
@@ -25,8 +33,23 @@ export function getHealth({ signal }: Options = {}) {
   return request('/health', healthResponse, { signal })
 }
 
-export function listEnvironments({ signal }: Options = {}) {
-  return request('/environments', environmentList, { signal })
+function inOrganization(organizationId: string, params = new URLSearchParams()) {
+  params.set('organization_id', organizationId)
+  return params
+}
+
+export function listEnvironments(organizationId: string, { signal }: Options = {}) {
+  return request(`/environments?${inOrganization(organizationId)}`, environmentList, { signal })
+}
+
+export function getEnvironment(id: string, { signal }: Options = {}) {
+  return request(`/environments/${encodeURIComponent(id)}`, environmentDetail, { signal })
+}
+
+export function getTelemetryCoverage(id: string, { signal }: Options = {}) {
+  return request(`/environments/${encodeURIComponent(id)}/telemetry`, telemetryCoverage, {
+    signal,
+  })
 }
 
 export function createEnvironment(data: EnvironmentCreate) {
@@ -37,11 +60,62 @@ export function createInvestigation(data: InvestigationCreate) {
   return request('/investigations', investigationRead, { method: 'POST', json: data })
 }
 
+export type InvestigationFilters = {
+  limit?: number
+  offset?: number
+  environmentId?: string
+  statuses?: readonly InvestigationStatus[]
+  latestTurnStatuses?: readonly TurnStatus[]
+}
+
 export function listInvestigations(
-  { limit = 20, offset = 0 }: { limit?: number; offset?: number } = {},
+  organizationId: string,
+  {
+    limit = 20,
+    offset = 0,
+    environmentId,
+    statuses = [],
+    latestTurnStatuses = [],
+  }: InvestigationFilters = {},
   { signal }: Options = {},
 ) {
-  return request(`/investigations?limit=${limit}&offset=${offset}`, investigationPage, { signal })
+  const params = inOrganization(
+    organizationId,
+    new URLSearchParams({ limit: String(limit), offset: String(offset) }),
+  )
+  if (environmentId) params.set('environment_id', environmentId)
+  for (const s of statuses) params.append('status', s)
+  for (const s of latestTurnStatuses) params.append('latest_turn_status', s)
+  return request(`/investigations?${params}`, investigationPage, { signal })
+}
+
+export function getOverview(organizationId: string, { signal }: Options = {}) {
+  return request(`/overview?${inOrganization(organizationId)}`, overviewCounts, { signal })
+}
+
+export type ReportFilters = {
+  limit?: number
+  offset?: number
+  outcome?: ReportOutcome
+  environmentId?: string
+  latestOnly?: boolean
+  q?: string
+}
+
+export function listReports(
+  organizationId: string,
+  { limit = 20, offset = 0, outcome, environmentId, latestOnly, q }: ReportFilters = {},
+  { signal }: Options = {},
+) {
+  const params = inOrganization(
+    organizationId,
+    new URLSearchParams({ limit: String(limit), offset: String(offset) }),
+  )
+  if (outcome) params.set('outcome', outcome)
+  if (environmentId) params.set('environment_id', environmentId)
+  if (latestOnly) params.set('latest_only', 'true')
+  if (q?.trim()) params.set('q', q.trim().slice(0, 100))
+  return request(`/reports?${params}`, reportListPage, { signal })
 }
 
 export function getInvestigation(id: string, { signal }: Options = {}) {

@@ -3,7 +3,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, String, Text, func, text
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -52,8 +52,23 @@ class Investigation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __table_args__ = (
         CheckConstraint("current_round >= 1", name="current_round_positive"),
         CheckConstraint(COMPLETED_AFTER_STARTED, name="completed_after_started"),
+        CheckConstraint(
+            "created_by_user_id IS NULL OR organization_id IS NOT NULL",
+            name="creator_with_organization",
+        ),
+        # Organization history pages: newest first within one organization.
+        Index("ix_investigations_organization_id_created_at", "organization_id", "created_at"),
     )
 
+    # NULL for ownerless records from before tenancy (D032). Every environment in the
+    # scope must belong to the same organization: a deferred trigger checks
+    # investigation_environments at commit (migration f2b7c1d9a4e3).
+    organization_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT")
+    )
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT")
+    )
     title: Mapped[str] = mapped_column(String(255))
     question: Mapped[str] = mapped_column(Text)
     status: Mapped[InvestigationStatus] = mapped_column(

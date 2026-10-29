@@ -18,6 +18,8 @@ class ExecutionContext(BaseModel):
     investigation_id: uuid.UUID
     assignment_id: uuid.UUID
     environment_id: uuid.UUID
+    # The tenant the token was issued for; None only for ownerless legacy records (D032).
+    organization_id: uuid.UUID | None = None
     # From the agent framework (e.g. LangGraph's tool_call_id) so a replayed call runs once.
     idempotency_key: str | None = Field(
         default=None, min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.:-]+$"

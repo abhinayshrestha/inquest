@@ -52,7 +52,7 @@ def parse_scope(metadata: Any) -> EnvironmentScope:
         raise Rejection("policy.scope_invalid", "environment SigNoz scope is invalid") from None
 
 
-def _claims(metadata: Any, identity: Identity) -> tuple[set[str], str | None]:
+def claims(metadata: Any, identity: Identity) -> tuple[set[str], str | None]:
     # Best effort on other environments: a malformed config still claims what it names,
     # so a typo elsewhere cannot make an overlapping identity look unambiguous.
     raw = metadata.get(SCOPE_KEY) if isinstance(metadata, dict) else None
@@ -92,7 +92,7 @@ def resolve_scope(req: BaseModel, own: EnvironmentScope, others: Iterable[Any]) 
     values = (narrow,) if narrow is not None else tuple(allowed)
     deployment = own.deployment_environment if identity == "service" else None
     for metadata in others:
-        claimed, their_deployment = _claims(metadata, identity)
+        claimed, their_deployment = claims(metadata, identity)
         overlap = claimed.intersection(values)
         if not overlap:
             continue

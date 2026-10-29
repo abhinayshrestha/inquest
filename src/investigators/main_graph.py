@@ -32,6 +32,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.runtime import Runtime
 from openai import LengthFinishReasonError
 
+from src.credentials.resolver import CredentialRefused
 from src.db.session import SessionLocal
 from src.investigators import context, policy, prompts, records
 from src.investigators.local_graph import AssignmentNotRunning, run_local_investigator
@@ -47,6 +48,7 @@ from src.investigators.main_validation import (
     validate_answer,
     validate_verdict,
 )
+from src.investigators.provider import investigation_model
 from src.investigators.schemas import AnswerDraft, Verdict
 from src.investigators.structured import audit_line, structured_call, tokens_of
 from src.investigators.validation import NOTE_PREFIX, problem_codes
@@ -66,12 +68,13 @@ DECISIONS = {
 
 @dataclass
 class MainContext:
-    """Never checkpointed. Main's own nodes use only main_model; the rest is passed through
-    to the Local Investigators."""
+    """Never checkpointed and holds no credentials. Models are built per step from the
+    investigation's credentials (provider); main_model/local_model are overrides for
+    tests and host scripts only, local_model passed through to the Local Investigators."""
 
-    main_model: BaseChatModel
-    local_model: BaseChatModel
     checkpointer: BaseCheckpointSaver
+    main_model: BaseChatModel | None = None
+    local_model: BaseChatModel | None = None
     mcp_settings: McpSettings | None = None
     mcp_transport: httpx2.AsyncBaseTransport | None = None
 
@@ -216,20 +219,25 @@ async def assess(state: MainState, runtime: Runtime[MainContext]) -> dict[str, A
         memory=context.memory_text(memory, policy.MEMORY_CHARS),
     )
     try:
-        verdict, problems, calls, tokens, first = await structured_call(
-            runtime.context.main_model,
-            Verdict,
-            [SystemMessage(prompts.MAIN_SYSTEM), HumanMessage(prompt)],
-            lambda v: validate_verdict(
-                v,
-                known,
-                question=state["question"],
-                rounds=state["rounds"],
-                window=window,
-                covered=covered,
-            ),
-            _budget_left(state),
-        )
+        async with investigation_model(
+            uuid.UUID(state["investigation_id"]), runtime.context.main_model
+        ) as model:
+            verdict, problems, calls, tokens, first = await structured_call(
+                model,
+                Verdict,
+                [SystemMessage(prompts.MAIN_SYSTEM), HumanMessage(prompt)],
+                lambda v: validate_verdict(
+                    v,
+                    known,
+                    question=state["question"],
+                    rounds=state["rounds"],
+                    window=window,
+                    covered=covered,
+                ),
+                _budget_left(state),
+            )
+    except CredentialRefused:
+        raise
     except Exception as exc:
         logger.warning("assess model call failed: %s", type(exc).__name__)
         return {"stop_reason": "model_error", "model_calls": state["model_calls"] + 1}
@@ -370,12 +378,17 @@ async def compose(state: MainState, runtime: Runtime[MainContext]) -> dict[str, 
         )
     if _budget_left(state) == 0:
         return {"stop_reason": "budget_exhausted", "draft": None}
-    # A schema-only tool for structured output, not an MCP tool: Main still has none.
-    runnable = runtime.context.main_model.with_structured_output(
-        AnswerDraft, method=policy.MAIN_COMPOSE_METHOD, include_raw=True
-    )
     try:
-        out = await runnable.ainvoke(messages)
+        async with investigation_model(
+            uuid.UUID(state["investigation_id"]), runtime.context.main_model
+        ) as model:
+            # A schema-only tool for structured output, not an MCP tool: Main still has none.
+            runnable = model.with_structured_output(
+                AnswerDraft, method=policy.MAIN_COMPOSE_METHOD, include_raw=True
+            )
+            out = await runnable.ainvoke(messages)
+    except CredentialRefused:
+        raise
     except LengthFinishReasonError:
         # Not a provider failure: the answer outgrew the output limit. Ask once for a
         # shorter one through the normal repair path.

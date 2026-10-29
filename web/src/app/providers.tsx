@@ -4,6 +4,7 @@ import { useState, type ReactNode } from 'react'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { createQueryClient } from '@/lib/query-client'
 
+import { AuthProvider } from './contexts/auth'
 import { OrganizationProvider } from './contexts/organization'
 import { ThemeProvider } from './contexts/theme'
 import { UiProvider } from './contexts/ui'
@@ -19,11 +20,13 @@ export function AppProviders({
   return (
     <QueryClientProvider client={client}>
       <ThemeProvider>
-        <OrganizationProvider>
-          <UiProvider>
-            <TooltipProvider delayDuration={300}>{children}</TooltipProvider>
-          </UiProvider>
-        </OrganizationProvider>
+        <AuthProvider>
+          <OrganizationProvider>
+            <UiProvider>
+              <TooltipProvider delayDuration={300}>{children}</TooltipProvider>
+            </UiProvider>
+          </OrganizationProvider>
+        </AuthProvider>
       </ThemeProvider>
     </QueryClientProvider>
   )

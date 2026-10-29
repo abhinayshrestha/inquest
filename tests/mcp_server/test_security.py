@@ -29,6 +29,7 @@ def claims_for(world: World, **overrides: Any) -> dict[str, Any]:
         "sub": str(world.assignment_id),
         "inv": str(world.investigation_id),
         "env": str(world.environment_id),
+        "org": "legacy",
         "scope": INVESTIGATE_SCOPE,
         "iat": now,
         "exp": now + 300,
@@ -98,7 +99,9 @@ async def test_token_without_investigator_scope_is_forbidden(mcp_app, world: Wor
 async def test_without_a_configured_secret_nothing_is_accepted(world: World):
     with pytest.raises(TokenConfigError):
         mint_assignment_token(
-            InvestigationAssignment(id=world.assignment_id), McpSettings(token_secret="short")
+            InvestigationAssignment(id=world.assignment_id),
+            McpSettings(token_secret="short"),
+            organization_id=None,
         )
     _, app = build_mcp_app(McpSettings(token_secret=None, allowed_hosts=["testserver"]))
     response = await post(app, token_for(world))
@@ -117,14 +120,18 @@ async def test_browser_origin_is_rejected(mcp_app, world: World):
     assert response.status_code == 403
 
 
-async def test_main_app_mounts_the_authenticated_endpoint():
+async def test_the_public_app_does_not_serve_mcp(world: World):
+    """MCP lives on the loopback listener only (D041): the public API answers 404 for
+    every spelling, even with a valid token."""
     from src.main import app
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://localhost"
     ) as client:
-        response = await client.post("/mcp/", json=LIST, headers=JSON_HEADERS)
-    assert response.status_code == 401
+        headers = {**JSON_HEADERS, "authorization": f"Bearer {token_for(world)}"}
+        for path in ("/mcp", "/mcp/", "/MCP/", "/%6dcp/", "//mcp/", "/./mcp/", "/api/mcp/"):
+            response = await client.post(path, json=LIST, headers=headers)
+            assert response.status_code == 404, path
 
 
 # --- binding and isolation ---------------------------------------------------------------

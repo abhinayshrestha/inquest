@@ -49,7 +49,7 @@ CANONICAL_TO_MCP = {v: k for k, v in MCP_TO_CANONICAL.items()}
 IDEMPOTENCY_META_KEY = "inquest/tool_call_id"
 IDEMPOTENCY_HEADER = "inquest-tool-call-id"
 
-BINDING_KEYS = ("investigation_id", "assignment_id", "environment_id")
+BINDING_KEYS = ("investigation_id", "assignment_id", "environment_id", "organization_id")
 MAX_TOOL_NAME_CHARS = 150
 READ_ONLY = types.ToolAnnotations(
     read_only_hint=True, destructive_hint=False, open_world_hint=False
@@ -170,8 +170,8 @@ async def _call_tool(
 
 
 def build_mcp_app(settings: McpSettings | None = None) -> tuple[Server[Any], Starlette]:
-    """Returns the server (its session_manager.run() must be entered by the host app's
-    lifespan, since a mounted app's own lifespan never runs) and the ASGI app to mount."""
+    """Returns the server and its ASGI app. The app's own lifespan runs the session
+    manager, so it must be served directly (src.mcp_server.listener), not mounted."""
     settings = settings or McpSettings()
     server: Server[Any] = Server(
         "inquest",

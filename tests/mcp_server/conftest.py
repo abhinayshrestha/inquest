@@ -22,7 +22,8 @@ from src.tools import execute_tool
 from tests.tools.conftest import SETTINGS, World, make_world, replies, world  # noqa: F401
 
 SECRET = "test-secret-" + "x" * 40
-MCP_SETTINGS = McpSettings(token_secret=SECRET, allowed_hosts=["testserver"])
+# Investigator runtimes address the derived loopback URL; direct tests use testserver.
+MCP_SETTINGS = McpSettings(token_secret=SECRET, allowed_hosts=["testserver", "127.0.0.1:*"])
 BASE_URL = "http://testserver"
 
 
@@ -32,7 +33,9 @@ def token_for(target: World, **kwargs: Any) -> str:
         investigation_id=target.investigation_id,
         environment_id=target.environment_id,
     )
-    return mint_assignment_token(assignment, MCP_SETTINGS, **kwargs)
+    return mint_assignment_token(
+        assignment, MCP_SETTINGS, organization_id=kwargs.pop("organization_id", None), **kwargs
+    )
 
 
 @pytest.fixture

@@ -140,7 +140,8 @@ async def test_auth_failure_never_echoes_key(settings):
     error = await raises(settings, handler)
     assert error.code == SigNozErrorCode.AUTH
     assert error.http_status == 401
-    assert "[redacted]" in error.message
+    # Authorization errors keep no provider text: it can name keys, accounts and roles.
+    assert error.message == "HTTP 401: not authorized"
 
 
 @pytest.mark.parametrize(

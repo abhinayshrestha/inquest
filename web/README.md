@@ -1,7 +1,7 @@
 # Inquest web
 
-React frontend for Inquest. Local development only: the backend has no authentication
-or tenant isolation yet.
+React frontend for Inquest. Sign-in, organizations and per-environment credentials are
+handled by the backend; this app only shows what the API returns.
 
 ## Setup
 

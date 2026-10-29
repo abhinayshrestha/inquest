@@ -4,7 +4,8 @@ import { eventsUrl, progressEvent, type ProgressEvent } from '@/lib/api'
 
 import { EVENT_TYPES } from './events'
 
-export type StreamStatus = 'connecting' | 'open' | 'reconnecting' | 'closed'
+// revoked: the server ended the stream because the session or membership is gone.
+export type StreamStatus = 'connecting' | 'open' | 'reconnecting' | 'closed' | 'revoked'
 
 const MAX_BACKOFF_MS = 15_000
 const BASE_BACKOFF_MS = 1_000
@@ -25,7 +26,8 @@ function reducer(state: State, incoming: ProgressEvent[]): State {
  * While the connection is merely interrupted, the browser reconnects by itself and sends
  * Last-Event-ID, which the backend replays from. When the EventSource gives up (closed:
  * HTTP error, proxy failure), a new one is opened with ?after=<last id>, with exponential
- * backoff. Malformed events are dropped, never rendered.
+ * backoff. Malformed events are dropped, never rendered. An access_revoked event (session
+ * ended or membership removed) closes the stream for good: reconnecting cannot succeed.
  */
 export function useEventStream(
   investigationId: string | null,
@@ -70,11 +72,17 @@ export function useEventStream(
       const after = lastIdRef.current
       source = new EventSource(eventsUrl(investigationId, after > 0 ? after : undefined))
       for (const type of EVENT_TYPES) source.addEventListener(type, handle)
+      source.addEventListener('access_revoked', () => {
+        disposed = true
+        source?.close()
+        setStatus('revoked')
+      })
       source.onopen = () => {
         attempts = 0
         setStatus('open')
       }
       source.onerror = () => {
+        if (disposed) return
         if (!source || source.readyState !== EventSource.CLOSED) {
           // The browser is retrying on its own with Last-Event-ID.
           setStatus('reconnecting')
@@ -93,7 +101,7 @@ export function useEventStream(
       disposed = true
       clearTimeout(retryTimer)
       source?.close()
-      setStatus('closed')
+      setStatus((current) => (current === 'revoked' ? current : 'closed'))
     }
   }, [investigationId])
 

@@ -81,6 +81,23 @@ describe('api client', () => {
     expect(error.message).toBe('String should have at least 1 character')
   })
 
+  it('keeps the fixed code of a coded refusal', async () => {
+    mockFetch({
+      'GET /health': {
+        status: 422,
+        body: {
+          detail: { code: 'auth_failed', message: 'the provider rejected these credentials' },
+        },
+      },
+    })
+    const error = await apiError(getHealth())
+    expect([error.kind, error.code, error.message]).toEqual([
+      'validation',
+      'auth_failed',
+      'the provider rejected these credentials',
+    ])
+  })
+
   it('rejects responses that do not match the contract', async () => {
     mockFetch({ 'GET /health': { body: { status: 'ok' } } })
     const error = await apiError(getHealth())
