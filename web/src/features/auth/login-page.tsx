@@ -267,7 +267,7 @@ export default function LoginPage() {
         </div>
 
         <footer className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-          <span>Answers you can check.</span>
+          <span></span>
           <span>© {new Date().getFullYear()} Inquest</span>
         </footer>
       </main>
