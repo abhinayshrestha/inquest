@@ -12,7 +12,6 @@ export function AiProviderTab({ environment }: { environment: EnvironmentDetail 
       <CredentialSection
         environment={environment}
         kind="nebius"
-        description="The Nebius Token Factory key and NVIDIA Nemotron models the Main and Local Investigators reason with. The key is encrypted on the server and never shown again; models never receive it."
         facts={[['API key and URL', 'Never shown or sent to the browser']]}
       >
         <Readiness environment={environment} />
@@ -27,16 +26,16 @@ export function AiProviderTab({ environment }: { environment: EnvironmentDetail 
             <Facts items={[['Source', PROVIDER_SOURCE[ai.source]]]} />
             {ai.issues.length > 0 && (
               <Notice tone="warning">
-                Missing or invalid settings: {ai.issues.join(', ')}. Investigations cannot run until
-                they are set in the backend&apos;s .env.
+                Missing or invalid settings: {ai.issues.join(', ')}. Investigations cannot run
+                until they are set in the backend&apos;s .env.
               </Notice>
             )}
           </div>
         </Section>
       )}
       <Notice>
-        Status comes from what is stored and whether this server can use it; this page never calls
-        the model provider to check it. Saving new credentials does check them once.
+        Status comes from what is stored and whether this server can use it; this page never
+        calls the model provider to check it. Saving new credentials does check them once.
       </Notice>
     </div>
   )

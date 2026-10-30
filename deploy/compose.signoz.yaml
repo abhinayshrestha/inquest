@@ -1,0 +1,39 @@
+# Single-client stack: deploy/compose.yaml plus a bundled SigNoz (docs/deployment.md).
+#
+#   docker compose -f deploy/compose.yaml -f deploy/compose.signoz.yaml <command>
+#
+# One stack serves one client organization: the bundled SigNoz is Community edition,
+# which can never be shared across organizations (D037), so it is that organization's
+# dedicated connection, verified by the operator (D038). Inquest reaches it as
+# http://signoz:8080 (allowlisted origin, INQUEST_TELEMETRY_ALLOWED_ORIGINS); clients
+# send OTLP through the proxy, which requires TLS and the bearer token
+# (INQUEST_OTLP_TOKEN). Extra variables:
+#   INQUEST_SIGNOZ_SERVER_NAME  host name of the SigNoz UI (same certificate as the app)
+#   SIGNOZ_CLICKHOUSE_MEMORY    ClickHouse memory limit (default 4g)
+# Extra secrets files in INQUEST_SECRETS_DIR:
+#   proxy.env            INQUEST_OTLP_TOKEN
+#   signoz.env           SIGNOZ_SQLSTORE_POSTGRES_DSN, SIGNOZ_TOKENIZER_JWT_SECRET
+#   signoz-metastore.env POSTGRES_PASSWORD (SigNoz's own metadata database)
+
+include:
+  - path: signoz/compose.yaml
+
+services:
+  proxy:
+    environment:
+      INQUEST_SIGNOZ_SERVER_NAME: ${INQUEST_SIGNOZ_SERVER_NAME:?SigNoz UI host name}
+    env_file: ${INQUEST_SECRETS_DIR:-./secrets}/proxy.env
+    ports:
+      - "${INQUEST_OTLP_GRPC_PORT:-4317}:4317"
+      - "${INQUEST_OTLP_HTTP_PORT:-4318}:4318"
+    volumes:
+      - ./nginx/signoz.conf.template:/etc/nginx/templates/signoz.conf.template:ro
+    networks:
+      telemetry: {}
+    depends_on:
+      signoz-signoz-0: { condition: service_healthy }
+      ingester: { condition: service_started }
+
+  app:
+    networks:
+      telemetry: {}
