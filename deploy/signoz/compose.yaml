@@ -1,0 +1,186 @@
+# Bundled SigNoz (Community) for a single-client stack. Included by
+# deploy/compose.signoz.yaml; see deploy/signoz/README.md for the source and every change
+# from upstream. Service names and config files stay as Foundry generates them (the
+# configs address each other by these names).
+#
+# Networks:
+#   signoz-internal  every SigNoz component; ClickHouse's default user has no password,
+#                    so nothing outside SigNoz may ever join this network.
+#   telemetry        SigNoz's query API (alias "signoz") and the OTLP ingester (alias
+#                    "signoz-ingester"), shared with the Inquest app and the proxy only.
+#   signoz-fetch     outbound only, for the one job that downloads ClickHouse's
+#                    histogramQuantile function (checksum-verified).
+# No ports are published: OTLP and the SigNoz UI are reachable only through the proxy.
+
+x-signoz-hardening: &hardening
+  security_opt: ["no-new-privileges:true"]
+  restart: unless-stopped
+
+x-clickhouse-dsn: &clickhouse-dsn tcp://signoz-telemetrystore-clickhouse-0-0:9000
+
+services:
+  ingester:
+    <<: *hardening
+    image: signoz/signoz-otel-collector:v0.144.15@sha256:3996e0ffc58bc86d433062a45ef7ff960a4768da0619944f651a17254d634daf
+    entrypoint: [/bin/sh]
+    command:
+      - -c
+      - |
+        /signoz-otel-collector migrate sync check &&
+        /signoz-otel-collector --config=/etc/otel-collector-config.yaml --manager-config=/etc/opamp-config.yaml --copy-path=/var/tmp/collector-config.yaml
+    environment:
+      SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_DSN: *clickhouse-dsn
+      SIGNOZ_OTEL_COLLECTOR_TIMEOUT: 10m
+    volumes:
+      - ./ingester/ingester.yaml:/etc/otel-collector-config.yaml:ro
+      - ./ingester/opamp.yaml:/etc/opamp-config.yaml:ro
+    networks:
+      signoz-internal: {}
+      telemetry: { aliases: [signoz-ingester] }
+    depends_on:
+      signoz-telemetrystore-migrator: { condition: service_completed_successfully }
+
+  signoz-signoz-0:
+    <<: *hardening
+    image: signoz/signoz:v0.148.1@sha256:a7d1a968a1f7f65c518106150ac05424ca8e91c52d7076077dfce034980e9c34
+    environment:
+      SIGNOZ_SQLSTORE_PROVIDER: postgres
+      SIGNOZ_TELEMETRYSTORE_PROVIDER: clickhouse
+      SIGNOZ_TELEMETRYSTORE_CLICKHOUSE_DSN: *clickhouse-dsn
+      SIGNOZ_GLOBAL_EXTERNAL__URL: https://${INQUEST_SIGNOZ_SERVER_NAME:?SigNoz UI host name}
+      SIGNOZ_GLOBAL_INGESTION__URL: https://${INQUEST_SERVER_NAME:?public host name}:4318
+      # No usage reporting to SigNoz (the networks give it no route out anyway).
+      SIGNOZ_ANALYTICS_ENABLED: "false"
+      SIGNOZ_STATSREPORTER_ENABLED: "false"
+    # SIGNOZ_SQLSTORE_POSTGRES_DSN (with the metastore password) and
+    # SIGNOZ_TOKENIZER_JWT_SECRET; generated, never the upstream defaults.
+    env_file: ${INQUEST_SECRETS_DIR:-../secrets}/signoz.env
+    healthcheck:
+      test: [CMD, wget, --spider, -q, http://localhost:8080/api/v1/health]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      signoz-internal: {}
+      telemetry: { aliases: [signoz] }
+    depends_on:
+      signoz-metastore-postgres-0: { condition: service_healthy }
+      signoz-telemetrystore-clickhouse-0-0: { condition: service_healthy }
+
+  signoz-metastore-postgres-0:
+    <<: *hardening
+    image: postgres:16@sha256:1beaa3084eee2676f20a9cd9928f0bf2c5bf674f8e49f81017912183d377c61c
+    environment:
+      POSTGRES_DB: signoz
+      POSTGRES_USER: signoz
+    # POSTGRES_PASSWORD, the same value as in signoz.env's DSN.
+    env_file: ${INQUEST_SECRETS_DIR:-../secrets}/signoz-metastore.env
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U signoz -d signoz]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    volumes:
+      - signoz-metastore:/var/lib/postgresql/data
+    networks: [signoz-internal]
+
+  signoz-telemetrykeeper-clickhousekeeper-0:
+    <<: *hardening
+    image: clickhouse/clickhouse-keeper:25.12.5@sha256:525b8b0f93ccb371131c46f22a066ea43d33d74aba314203e8044609945d8524
+    entrypoint: [/usr/bin/clickhouse-keeper, --config-file=/etc/clickhouse-keeper/keeper.yaml]
+    healthcheck:
+      test: [CMD, clickhouse-keeper-client, -h, localhost, -p, "9181", -q, ls]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    volumes:
+      - signoz-keeper:/var/lib/clickhouse-keeper
+      - ./telemetrykeeper/clickhousekeeper/keeper-0.yaml:/etc/clickhouse-keeper/keeper.yaml:ro
+    networks: [signoz-internal]
+
+  signoz-telemetrystore-clickhouse-0-0:
+    <<: *hardening
+    image: clickhouse/clickhouse-server:25.12.5@sha256:cacf32d6884291dc2ff5e0156a97f46fc53ff7c929a7906d114e268a929dfd3a
+    environment:
+      CLICKHOUSE_SKIP_USER_SETUP: "1"
+      CLICKHOUSE_CONFIG: /etc/clickhouse-server/config-0-0.yaml
+    # ClickHouse sizes its own memory use from this limit; raise it on bigger hosts.
+    mem_limit: ${SIGNOZ_CLICKHOUSE_MEMORY:-4g}
+    healthcheck:
+      test: [CMD, wget, --spider, -q, http://localhost:8123/ping]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    volumes:
+      - signoz-clickhouse:/var/lib/clickhouse
+      - signoz-user-scripts:/var/lib/clickhouse/user_scripts:ro
+      - ./telemetrystore/clickhouse/config-0-0.yaml:/etc/clickhouse-server/config-0-0.yaml:ro
+      - ./telemetrystore/clickhouse/functions.yaml:/etc/clickhouse-server/functions.yaml:ro
+    networks: [signoz-internal]
+    depends_on:
+      signoz-telemetrykeeper-clickhousekeeper-0: { condition: service_healthy }
+      signoz-telemetrystore-clickhouse-user-scripts: { condition: service_completed_successfully }
+
+  # Upstream downloads this on every start, unverified; here once, against pinned
+  # checksums of the v0.0.1 release assets, and skipped when already installed.
+  signoz-telemetrystore-clickhouse-user-scripts:
+    image: clickhouse/clickhouse-server:25.12.5@sha256:cacf32d6884291dc2ff5e0156a97f46fc53ff7c929a7906d114e268a929dfd3a
+    security_opt: ["no-new-privileges:true"]
+    restart: on-failure
+    command:
+      - bash
+      - -c
+      - |-
+        set -euo pipefail
+        target=/var/lib/clickhouse/user_scripts/histogramQuantile
+        if [ -x "$$target" ]; then exit 0; fi
+        arch=$$(uname -m | sed s/aarch64/arm64/ | sed s/x86_64/amd64/)
+        case "$$arch" in
+          amd64) sum=33997073eb6d82b7be4f27f9fc8ec9e28a395e0f20674d5d54bb2fa28a75488d ;;
+          arm64) sum=e5605ebffa82a450ebbcdf6cf19dad546e1e40d52dbf3e03cfd2d2d5b7394211 ;;
+          *) echo "unsupported architecture $$arch" >&2; exit 1 ;;
+        esac
+        cd /tmp
+        wget -q -O histogram-quantile.tar.gz "https://github.com/SigNoz/signoz/releases/download/histogram-quantile%2Fv0.0.1/histogram-quantile_linux_$${arch}.tar.gz"
+        echo "$$sum  histogram-quantile.tar.gz" | sha256sum -c -
+        tar -xzf histogram-quantile.tar.gz
+        mv histogram-quantile "$$target"
+    volumes:
+      - signoz-user-scripts:/var/lib/clickhouse/user_scripts
+    networks: [signoz-fetch]
+
+  signoz-telemetrystore-migrator:
+    image: signoz/signoz-otel-collector:v0.144.15@sha256:3996e0ffc58bc86d433062a45ef7ff960a4768da0619944f651a17254d634daf
+    security_opt: ["no-new-privileges:true"]
+    restart: on-failure
+    entrypoint: [/bin/sh]
+    command:
+      - -c
+      - |
+        /signoz-otel-collector migrate ready &&
+        /signoz-otel-collector migrate bootstrap &&
+        /signoz-otel-collector migrate sync up &&
+        /signoz-otel-collector migrate async up
+    environment:
+      SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_DSN: *clickhouse-dsn
+      SIGNOZ_OTEL_COLLECTOR_TIMEOUT: 10m
+    networks: [signoz-internal]
+    depends_on:
+      signoz-telemetrystore-clickhouse-0-0: { condition: service_healthy }
+
+networks:
+  signoz-internal:
+    internal: true
+  telemetry:
+    internal: true
+  signoz-fetch: {}
+
+volumes:
+  signoz-metastore: {}
+  signoz-keeper: {}
+  signoz-clickhouse: {}
+  signoz-user-scripts: {}
