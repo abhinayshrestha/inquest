@@ -64,7 +64,7 @@ export function CredentialSection({
 }: {
   environment: EnvironmentDetail
   kind: CredentialKind
-  description: ReactNode
+  description?: ReactNode
   facts?: [string, ReactNode][]
   children?: ReactNode
 }) {
