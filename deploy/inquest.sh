@@ -194,6 +194,10 @@ SIGNOZ_ADMIN_EMAIL=$INQUEST_ACME_EMAIL
 SIGNOZ_ADMIN_PASSWORD=$(openssl rand -hex 16)Aa1!
 EOF
   chmod 600 ./*.env ca.key tls/privkey.pem postgres/server.key
+  # Public certificates. The application runs as an unprivileged user (uid 10001), so the
+  # CA it verifies PostgreSQL with must be world-readable on the host (Linux enforces
+  # this on bind mounts; Docker Desktop does not).
+  chmod 644 postgres/ca.pem postgres/server.crt tls/fullchain.pem
 
   printf '\nDone. Next: deploy/inquest.sh up\n'
   printf 'Keep %s backed up separately from database backups (it holds the credential keys).\n' "$SECRETS"
