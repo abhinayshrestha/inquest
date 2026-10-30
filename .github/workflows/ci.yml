@@ -64,3 +64,13 @@ jobs:
       - run: pnpm format:check
       - run: pnpm test
       - run: pnpm build
+
+  deploy:
+    # A real Linux Docker host with a non-root user in the docker group: the permissions
+    # the hardened proxy sees (Docker Desktop does not enforce them).
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n deploy/inquest.sh && bash -n deploy/e2e/tls_permissions.sh
+      - name: TLS files are readable by the hardened proxy and nobody else
+        run: deploy/e2e/tls_permissions.sh
