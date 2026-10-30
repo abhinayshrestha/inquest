@@ -3,6 +3,7 @@
 **/.env
 **/.env.*
 deploy/secrets/
+deploy/backups/
 .git/
 .venv/
 **/__pycache__/
