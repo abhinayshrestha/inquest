@@ -4,12 +4,14 @@
 #
 #   deploy/inquest.sh init            ask for host names and sign-in; generate every secret
 #   deploy/inquest.sh up              build, provision, migrate, start SigNoz, then app + proxy
-#   deploy/inquest.sh certs           Let's Encrypt certificate for both names (port 80 open)
+#   deploy/inquest.sh certs           Let's Encrypt certificate for both names (port 80 open);
+#                                     installs or renews only when needed, safe to schedule
+#   deploy/inquest.sh schedule-renewal  weekly 'certs' in this user's crontab
 #   deploy/inquest.sh admit EMAIL     approve the first user (D042)
 #   deploy/inquest.sh bind-signoz     after that user created the organization (D037, D038)
 #   deploy/inquest.sh upgrade         after git pull: rebuild, migrate, restart app + proxy
 #   deploy/inquest.sh backup          pg_dump of the Inquest database
-#   deploy/inquest.sh status | logs [SERVICE] | down
+#   deploy/inquest.sh status | logs [SERVICE] | restart [SERVICE] | down
 #
 # Everything about this deployment lives in INQUEST_SECRETS_DIR (default deploy/secrets,
 # git-ignored, mode 0700): stack.env (host names, not secret) and one file per process.
@@ -48,7 +50,7 @@ compose() { docker compose -p "$PROJECT" "${FILES[@]}" "$@"; }
 
 container() { compose ps -a -q "$1"; }
 
-wait_healthy() {  # wait_healthy SERVICE SECONDS
+healthy() {  # healthy SERVICE SECONDS: 0 once healthy, 1 on timeout (logs shown)
   local deadline=$((SECONDS + $2)) status
   while ((SECONDS < deadline)); do
     status=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$(container "$1")" 2>/dev/null || true)
@@ -56,8 +58,11 @@ wait_healthy() {  # wait_healthy SERVICE SECONDS
     sleep 5
   done
   compose logs --tail 30 "$1" >&2 || true
-  die "$1 is not healthy after $2 s (last status: ${status:-none})"
+  printf '%s is not healthy after %s s (last status: %s)\n' "$1" "$2" "${status:-none}" >&2
+  return 1
 }
+
+wait_healthy() { healthy "$@" || exit 1; }
 
 exited_ok() {  # one-off jobs the long-running services depend on
   local state
@@ -90,9 +95,88 @@ check_value() {
   esac
 }
 
+# --- TLS files for the proxy --------------------------------------------------------
+# The proxy runs as root with cap_drop ALL (deploy/compose.yaml): without CAP_DAC_OVERRIDE
+# it can open only files root owns or everyone may read. So the TLS directory is
+# root:root 0700, the chain root 0644 and the key root 0600: the key stays unreadable to
+# every other user, the deploying user included. Writing them needs root; a throwaway
+# container does it (Docker access is root-equivalent anyway), so no sudo and no terminal
+# is needed and scheduled renewals work.
+tls_root() {  # tls_root SCRIPT [docker run arguments, i.e. mounts]
+  local script="$1"
+  shift
+  docker run --rm --network none --read-only --cap-drop ALL --cap-add CHOWN \
+    --cap-add DAC_OVERRIDE --cap-add FOWNER --security-opt no-new-privileges:true \
+    "$@" --entrypoint sh "$CERTBOT_IMAGE" -ec "$script"
+}
+
+installed_cert() {  # installed_cert TLS_DIR: the installed chain on stdout (public), if any
+  [[ -d "$1" ]] || return 0
+  tls_root 'cat /tls/fullchain.pem 2>/dev/null || true' -v "$1:/tls:ro"
+}
+
+cert_ok() {  # cert_ok CERT DAYS NAME...: parses, valid DAYS more days, names every NAME
+  local cert="$1" days="$2" text name
+  shift 2
+  openssl x509 -in "$cert" -noout -checkend $((days * 86400)) >/dev/null 2>&1 || return 1
+  text=$(openssl x509 -in "$cert" -noout -text 2>/dev/null) || return 1
+  for name in "$@"; do grep -qE "DNS:${name//./\\.}(,|$)" <<<"$text" || return 1; done
+}
+
+issued_by_acme() {  # the placeholder from init is issued by the internal CA
+  [[ -s "$1" ]] && ! openssl x509 -in "$1" -noout -issuer 2>/dev/null | grep -q "Inquest internal"
+}
+
+check_pair() {  # check_pair CERT KEY NAME...: a usable chain whose key is KEY
+  local cert="$1" key="$2"
+  shift 2
+  cert_ok "$cert" 0 "$@" || return 1
+  [[ "$(openssl x509 -in "$cert" -noout -pubkey 2>/dev/null)" == \
+    "$(openssl pkey -in "$key" -pubout 2>/dev/null)" ]]
+}
+
+install_tls() {  # install_tls CERT KEY TLS_DIR NAME...
+  local cert="$1" key="$2" dest="$3"
+  shift 3
+  check_pair "$cert" "$key" "$@" ||
+    die "certificate and key are not a valid pair for $*; nothing installed"
+  [[ -d "$dest" ]] || mkdir -p "$dest"
+  # New files under temporary names first, the previous pair kept as *.prev, then one
+  # rename each (same directory, so neither file is ever partly written).
+  tls_root '
+    umask 077
+    cp /in/fullchain.pem /tls/.fullchain.pem.new
+    cp /in/privkey.pem /tls/.privkey.pem.new
+    chown 0:0 /tls /tls/.fullchain.pem.new /tls/.privkey.pem.new
+    chmod 0700 /tls
+    chmod 0644 /tls/.fullchain.pem.new
+    chmod 0600 /tls/.privkey.pem.new
+    for f in fullchain.pem privkey.pem; do
+      if [ -f "/tls/$f" ]; then cp /tls/$f /tls/$f.prev; chown 0:0 /tls/$f.prev; fi
+    done
+    chmod 0644 /tls/fullchain.pem.prev 2>/dev/null || true
+    chmod 0600 /tls/privkey.pem.prev 2>/dev/null || true
+    mv -f /tls/.privkey.pem.new /tls/privkey.pem
+    mv -f /tls/.fullchain.pem.new /tls/fullchain.pem
+  ' -v "$(readlink -f "$cert"):/in/fullchain.pem:ro" -v "$(readlink -f "$key"):/in/privkey.pem:ro" \
+    -v "$dest:/tls"
+}
+
+rollback_tls() {  # rollback_tls TLS_DIR: back to the pair install_tls replaced
+  tls_root '
+    [ -f /tls/fullchain.pem.prev ] && [ -f /tls/privkey.pem.prev ] || exit 3
+    mv -f /tls/privkey.pem.prev /tls/privkey.pem
+    mv -f /tls/fullchain.pem.prev /tls/fullchain.pem
+    chown 0:0 /tls/privkey.pem /tls/fullchain.pem
+    chmod 0600 /tls/privkey.pem
+    chmod 0644 /tls/fullchain.pem
+  ' -v "$1:/tls"
+}
+
 cmd_init() {
   [[ ! -e "$SECRETS/app.env" ]] || die "$SECRETS already holds a deployment; refusing to overwrite it"
   command -v openssl >/dev/null || die "openssl is required"
+  docker info >/dev/null 2>&1 || die "Docker is not reachable (installed? user in the docker group?)"
 
   ask INQUEST_SERVER_NAME "Inquest host name (e.g. inquest.example.com)"
   INQUEST_SERVER_NAME=$(lower "$INQUEST_SERVER_NAME")
@@ -117,7 +201,7 @@ cmd_init() {
 
   step "generating secrets in $SECRETS"
   umask 077
-  mkdir -p "$SECRETS/tls" "$SECRETS/postgres"
+  mkdir -p "$SECRETS/postgres"
   chmod 700 "$SECRETS"
   cd "$SECRETS"
 
@@ -134,7 +218,12 @@ cmd_init() {
     rm "$1/req.csr" "$1/ext.cnf"
   }
   issue postgres server.crt server.key 3650 "DNS:postgres"
-  issue tls fullchain.pem privkey.pem 30 "DNS:$INQUEST_SERVER_NAME,DNS:$INQUEST_SIGNOZ_SERVER_NAME"
+  local staging
+  staging=$(mktemp -d)
+  issue "$staging" fullchain.pem privkey.pem 30 "DNS:$INQUEST_SERVER_NAME,DNS:$INQUEST_SIGNOZ_SERVER_NAME"
+  install_tls "$staging/fullchain.pem" "$staging/privkey.pem" "$SECRETS/tls" \
+    "$INQUEST_SERVER_NAME" "$INQUEST_SIGNOZ_SERVER_NAME"
+  rm -rf "$staging"
 
   local admin_pw app_pw migration_pw signoz_db_pw
   admin_pw=$(secret 32) app_pw=$(secret 32) migration_pw=$(secret 32) signoz_db_pw=$(openssl rand -hex 24)
@@ -193,11 +282,11 @@ EOF
 SIGNOZ_ADMIN_EMAIL=$INQUEST_ACME_EMAIL
 SIGNOZ_ADMIN_PASSWORD=$(openssl rand -hex 16)Aa1!
 EOF
-  chmod 600 ./*.env ca.key tls/privkey.pem postgres/server.key
+  chmod 600 ./*.env ca.key postgres/server.key
   # Public certificates. The application runs as an unprivileged user (uid 10001), so the
   # CA it verifies PostgreSQL with must be world-readable on the host (Linux enforces
   # this on bind mounts; Docker Desktop does not).
-  chmod 644 postgres/ca.pem postgres/server.crt tls/fullchain.pem
+  chmod 644 postgres/ca.pem postgres/server.crt
 
   printf '\nDone. Next: deploy/inquest.sh up\n'
   printf 'Keep %s backed up separately from database backups (it holds the credential keys).\n' "$SECRETS"
@@ -295,30 +384,69 @@ The certificate is a placeholder until 'deploy/inquest.sh certs'. Then:
 EOF
 }
 
+RENEW_DAYS=30
+
 cmd_certs() {
   load_stack
-  local tls="$SECRETS/tls" le="$SECRETS/letsencrypt"
-  if openssl x509 -in "$tls/fullchain.pem" -noout -issuer 2>/dev/null | grep -qv "Inquest internal" &&
-    openssl x509 -in "$tls/fullchain.pem" -noout -checkend $((30 * 86400)) >/dev/null; then
-    echo "certificate valid for more than 30 days; nothing to do"
+  local tls="$SECRETS/tls" le="$SECRETS/letsencrypt" live out
+  local names=("$INQUEST_SERVER_NAME" "$INQUEST_SIGNOZ_SERVER_NAME")
+  live="$le/config/live/inquest"
+  mkdir -p "$le"
+  # One run at a time (a scheduled renewal and a manual one).
+  if command -v flock >/dev/null; then
+    exec 9>"$le/.certs.lock"
+    flock -n 9 || die "another 'certs' run is in progress"
+  fi
+
+  installed_cert "$tls" >"$le/.installed.pem"
+  if issued_by_acme "$le/.installed.pem" && cert_ok "$le/.installed.pem" "$RENEW_DAYS" "${names[@]}"; then
+    echo "installed certificate is valid for more than $RENEW_DAYS days; nothing to do"
     return 0
   fi
-  mkdir -p "$le"
-  step "Let's Encrypt (HTTP-01 on port 80; the proxy stops for a few seconds)"
-  compose stop proxy
-  # Whatever happens, the proxy comes back (with the old certificate on failure).
-  trap 'compose up -d proxy >/dev/null' EXIT
-  docker run --rm -p 80:80 --user "$(id -u):$(id -g)" -v "$le:/le" "$CERTBOT_IMAGE" \
-    certonly --standalone --non-interactive --agree-tos -m "$INQUEST_ACME_EMAIL" \
-    --config-dir /le/config --work-dir /le/work --logs-dir /le/logs \
-    --cert-name inquest -d "$INQUEST_SERVER_NAME" -d "$INQUEST_SIGNOZ_SERVER_NAME" \
-    ${INQUEST_ACME_STAGING:+--staging}
-  install -m 600 "$le/config/live/inquest/fullchain.pem" "$tls/fullchain.pem"
-  install -m 600 "$le/config/live/inquest/privkey.pem" "$tls/privkey.pem"
+
+  # Whatever happens below, the proxy comes back up (with the old pair if this fails).
+  trap 'compose up -d proxy >/dev/null 2>&1 || true' EXIT
+  if [[ -f "$live/fullchain.pem" ]] && cert_ok "$live/fullchain.pem" "$RENEW_DAYS" "${names[@]}"; then
+    echo "the Let's Encrypt certificate on disk is current; installing it without a new request"
+    # Checked and installed while the proxy still serves (nginx reads files only at
+    # start): a bad pair is refused before any downtime.
+    install_tls "$live/fullchain.pem" "$live/privkey.pem" "$tls" "${names[@]}"
+    compose stop proxy
+  else
+    step "Let's Encrypt (HTTP-01 on port 80; the proxy stops while certbot answers)"
+    compose stop proxy
+    docker run --rm -p 80:80 --user "$(id -u):$(id -g)" -v "$le:/le" "$CERTBOT_IMAGE" \
+      certonly --standalone --non-interactive --agree-tos --keep-until-expiring \
+      -m "$INQUEST_ACME_EMAIL" --config-dir /le/config --work-dir /le/work --logs-dir /le/logs \
+      --cert-name inquest -d "${names[0]}" -d "${names[1]}" ${INQUEST_ACME_STAGING:+--staging}
+    install_tls "$live/fullchain.pem" "$live/privkey.pem" "$tls" "${names[@]}"
+  fi
+
+  step "check the installed certificate with the proxy, then start it"
+  # The real proxy image, configuration and hardening read the new pair before it serves.
+  if ! out=$(compose run --rm --no-deps -T proxy nginx -t 2>&1); then
+    printf '%s\n' "$out" >&2
+    rollback_tls "$tls"
+    die "the proxy rejected the new certificate; the previous one is restored"
+  fi
   compose up -d proxy
+  if ! healthy proxy 60; then
+    rollback_tls "$tls"
+    compose up -d --force-recreate proxy >/dev/null
+    die "the proxy did not become healthy with the new certificate; the previous one is restored"
+  fi
   trap - EXIT
-  wait_healthy proxy 60
-  echo "certificate installed. Renew weekly, e.g. cron: 0 4 * * 1 $ROOT/deploy/inquest.sh certs"
+  echo "certificate installed (valid until $(openssl x509 -in "$live/fullchain.pem" -noout -enddate | cut -d= -f2))."
+  echo "Scheduled renewal: deploy/inquest.sh schedule-renewal"
+}
+
+cmd_schedule_renewal() {
+  load_stack
+  local line="17 4 * * 1 $ROOT/deploy/inquest.sh certs >>$SECRETS/letsencrypt/renew.log 2>&1"
+  command -v crontab >/dev/null || die "crontab is not available; schedule '$ROOT/deploy/inquest.sh certs' weekly"
+  # This user's crontab: Docker access is all renewal needs (no sudo, no terminal).
+  { crontab -l 2>/dev/null | grep -vF "$ROOT/deploy/inquest.sh certs" || true; echo "$line"; } | crontab -
+  echo "weekly renewal check scheduled for $(id -un): $line"
 }
 
 cmd_admit() {
@@ -382,16 +510,26 @@ cmd_backup() {
   echo "wrote $file. Copy it off this host, encrypted; keep $SECRETS (credential keys) apart from it."
 }
 
-case "${1:-}" in
-  init) cmd_init ;;
-  up) cmd_up ;;
-  certs) cmd_certs ;;
-  admit) shift; cmd_admit "$@" ;;
-  bind-signoz) cmd_bind_signoz ;;
-  upgrade) cmd_upgrade ;;
-  backup) cmd_backup ;;
-  status) load_stack; compose ps -a ;;
-  logs) shift; load_stack; compose logs --tail 100 "$@" ;;
-  down) load_stack; compose down ;;
-  *) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
-esac
+main() {
+  case "${1:-}" in
+    init) cmd_init ;;
+    up) cmd_up ;;
+    certs) cmd_certs ;;
+    admit) shift; cmd_admit "$@" ;;
+    bind-signoz) cmd_bind_signoz ;;
+    schedule-renewal) cmd_schedule_renewal ;;
+    upgrade) cmd_upgrade ;;
+    backup) cmd_backup ;;
+    status) load_stack; compose ps -a ;;
+    logs) shift; load_stack; compose logs --tail 100 "$@" ;;
+    # e.g. after a change to deploy/nginx/*.template (rendered only at start)
+    restart) shift; load_stack; compose restart "$@" ;;
+    down) load_stack; compose down ;;
+    *) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  esac
+}
+
+# Sourced by deploy/e2e/tls_permissions.sh for its helpers; run otherwise.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
